@@ -1,0 +1,25 @@
+[tool.poetry]
+name = "skymapper"
+version = "0.1.0"
+description = "A tool for mapping fisheye sky images to HEALPix coordinates"
+authors = ["Your Name <your.email@example.com>"]
+readme = "README.md"
+packages = [{include = "skymapper"}]
+
+[tool.poetry.dependencies]
+python = ">=3.11"
+numpy = "^2.2.6"
+astropy = "^7.1.0"
+healpy = "^1.18.1"
+opencv-python = "^4.11.0.86"
+scipy = "^1.15.3"
+click = "^8.1.7"
+astroquery = "^0.4.10"
+matplotlib = "^3.10.3"
+
+[tool.poetry.scripts]
+skymapper = "skymapper.main:main"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
