@@ -8,13 +8,9 @@ from astropy.io import fits
 from astropy.wcs import WCS
 from scipy.interpolate import griddata
 from astroquery.astrometry_net import AstrometryNet
-from typing import Optional
-
-import logging
+from .logger import logger
 from .calibration import load_calibration, correct_distortion
 from .plate_solver import solve_plate
-
-logger = logging.getLogger(__name__)
 
 def load_image(image_path: str) -> np.ndarray:
     """
@@ -197,7 +193,8 @@ def process_image(
         image = load_image(image_path)
         
         # Correct fisheye distortion
-        image = correct_fisheye_distortion(image, calibration_file)
+        if calibration_file:
+            image = correct_fisheye_distortion(image, calibration_file)
         
         # Solve plate
         wcs = solve_plate(image_path, api_key)

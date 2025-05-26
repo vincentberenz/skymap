@@ -2,6 +2,7 @@
 
 __version__ = "0.1.0"
 
+from .logger import logger
 from .mapper import (
     load_image,
     correct_fisheye_distortion,

@@ -1,16 +1,16 @@
-import logging
 from typing import Optional
 
 import healpy as hp
 import matplotlib.pyplot as plt
 import numpy as np
 
+from .logger import logger
 from .mapper import convert_to_healpix
 
-logger = logging.getLogger(__name__)
 
-
-def visualize_healpix_map(healpix_map: np.ndarray, output_path: Optional[str] = None) -> None:
+def visualize_healpix_map(
+    healpix_map: np.ndarray, output_path: Optional[str] = None
+) -> None:
     """
     Visualize the HEALPix map
 
@@ -46,7 +46,9 @@ def visualize_healpix_map(healpix_map: np.ndarray, output_path: Optional[str] = 
         raise
 
 
-def plot_healpix_projection(healpix_map: np.ndarray, nside: Optional[int] = None) -> None:
+def plot_healpix_projection(
+    healpix_map: np.ndarray, nside: Optional[int] = None
+) -> None:
     """
     Plot the HEALPix map in Mollweide projection
 

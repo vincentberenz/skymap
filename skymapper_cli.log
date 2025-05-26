@@ -1,0 +1,2 @@
+2025-05-26 17:19:40 | ERROR    | skymapper.main:main:162 - Error in main: process_image_cli() missing 3 required positional arguments: 'image_path', 'calibration_file', and 'output'
+2025-05-26 17:22:58 | ERROR    | skymapper.main:main:201 - Error in main: process_image_cli() missing 3 required positional arguments: 'image_path', 'calibration_file', and 'output'

@@ -16,6 +16,7 @@ scipy = "^1.15.3"
 click = "^8.1.7"
 astroquery = "^0.4.10"
 matplotlib = "^3.10.3"
+loguru = "^0.7.2"
 
 [tool.poetry.scripts]
 skymapper = "skymapper.main:main"

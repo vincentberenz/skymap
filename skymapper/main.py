@@ -1,10 +1,12 @@
-import logging
+import sys
+from pathlib import Path
 from typing import List, Optional
 
 import click
 import numpy as np
 
 from .calibration import generate_calibration_from_stars
+from .logger import logger
 from .mapper import (
     convert_to_healpix,
     correct_fisheye_distortion,
@@ -13,8 +15,6 @@ from .mapper import (
 )
 from .plate_solver import solve_plate
 from .utils import plot_healpix_projection, visualize_healpix_map
-
-logger = logging.getLogger(__name__)
 
 
 def process_tiff_image(
@@ -69,73 +69,6 @@ def process_tiff_image(
         raise
 
 
-def process_image_cli(
-    image_path: str,
-    calibration_file: str,
-    output: str,
-    api_key: Optional[str] = None,
-) -> None:
-    """
-    Process an image through the full pipeline
-
-    Args:
-        image_path: Path to the input image
-        calibration_file: Path to fisheye calibration parameters
-        output: Output file path
-        api_key: Optional Astrometry.net API key
-    """
-    try:
-        # Load and process the image
-        image = load_image(image_path)
-        image = correct_fisheye_distortion(image, calibration_file)
-        wcs = solve_plate(image_path, api_key)
-        healpix_map = convert_to_healpix(image, wcs)
-
-        # Save the result
-        np.save(output, healpix_map)
-        logger.info(f"Successfully processed image and saved to {output}")
-        click.echo(f"Successfully processed image and saved to {output}")
-
-    except Exception as e:
-        logger.error(str(e))
-        click.echo(f"Error: {str(e)}", err=True)
-        raise
-
-
-def calibrate_cli(
-    image_paths: List[str],
-    api_key: Optional[str],
-    output: str,
-    min_stars: int,
-    star_threshold: float,
-) -> None:
-    """
-    Generate fisheye camera calibration parameters from night sky images.
-
-    Args:
-        image_paths: List of paths to night sky images
-        api_key: Optional Astrometry.net API key
-        output: Output file for calibration parameters
-        min_stars: Minimum number of stars required per image
-        star_threshold: Threshold for star detection
-    """
-    try:
-        calibration_params = generate_calibration_from_stars(
-            image_paths=image_paths,
-            api_key=api_key,
-            output_file=output,
-            min_stars=min_stars,
-            star_threshold=star_threshold,
-        )
-        click.echo(
-            f"Successfully generated calibration parameters and saved to {output}"
-        )
-    except Exception as e:
-        logger.error(str(e))
-        click.echo(f"Error: {str(e)}", err=True)
-        raise
-
-
 @click.group()
 def main():
     """Process night sky images and generate calibration parameters."""
@@ -163,34 +96,29 @@ def visualize(
     IMAGE_PATH: Path to the input TIFF image
     """
     try:
-        # Process the image
-        image = load_image(image_path)
-        if calibration:
-            image = correct_fisheye_distortion(image, calibration)
-        wcs = solve_plate(image_path, api_key)
-        healpix_map = convert_to_healpix(image, wcs, nside=nside)
-
-        # Visualize the result
-        visualize_healpix_map(healpix_map, show=not no_show)
-        if output:
-            np.save(output, healpix_map)
-            logger.info(f"Successfully saved visualization to {output}")
-
-        click.echo("Successfully processed and visualized image")
-
+        show_plot = not no_show
+        healpix_map = process_tiff_image(
+            image_path=image_path,
+            healpix_nside=nside,
+            calibration_file=calibration,
+            api_key=api_key,
+            output_path=output,
+            show_plot=show_plot,
+        )
+        if show_plot:
+            plot_healpix_projection(healpix_map)
     except Exception as e:
-        logger.error(str(e))
-        click.echo(f"Error: {str(e)}", err=True)
+        logger.error(f"Error processing image: {str(e)}")
         raise
 
 
 @main.command()
 @click.argument("image-path", type=click.Path(exists=True))
 @click.option(
-    "--calibration-file", required=True, help="Path to fisheye calibration parameters"
+    "-c", "--calibration", required=True, help="Path to fisheye calibration parameters"
 )
-@click.option("--output", default="output.npy", help="Output file path")
-@click.option("--api-key", help="Astrometry.net API key")
+@click.option("-o", "--output", required=True, help="Output file path")
+@click.option("-a", "--api-key", help="Astrometry.net API key")
 def process(
     image_path: str,
     calibration_file: str,
@@ -202,24 +130,49 @@ def process(
 
     IMAGE_PATH: Path to the input image
     """
-    process_image_cli(image_path, calibration_file, output, api_key)
+    try:
+        logger.info(f"Processing image: {image_path}")
+        healpix_map = process_tiff_image(
+            image_path=image_path,
+            calibration_file=calibration_file,
+            api_key=api_key,
+            output_path=output,
+            show_plot=False,
+        )
+        logger.info(f"Successfully processed image and saved to {output}")
+    except Exception as e:
+        logger.error(f"Error processing image: {str(e)}")
+        raise
 
 
-@main.command("calibrate")
-@click.argument("image-paths", nargs=-1, required=True, type=click.Path(exists=True))
-@click.option("--api-key", help="Astrometry.net API key")
+@main.command()
+@click.argument("image_dir", type=click.Path(exists=True, file_okay=False))
 @click.option(
-    "--output",
+    "-k", "--api-key", help="Astrometry.net API key (required for plate solving)"
+)
+@click.option(
     "-o",
-    default="calibration.xml",
-    help="Output file for calibration parameters",
+    "--output",
+    default="skymapper_fisheye_calibration.xml",
+    show_default=True,
+    type=click.Path(dir_okay=False),
 )
 @click.option(
-    "--min-stars", default=20, help="Minimum number of stars required per image"
+    "-s",
+    "--min-stars",
+    default=20,
+    show_default=True,
+    help="Minimum number of stars required per image patch",
 )
-@click.option("--star-threshold", default=100, help="Threshold for star detection")
+@click.option(
+    "-t",
+    "--star-threshold",
+    default=100.0,
+    show_default=True,
+    help="Threshold for star detection (higher value = fewer stars)",
+)
 def calibrate(
-    image_paths: List[str],
+    image_dir: str,
     api_key: str,
     output: str,
     min_stars: int,
@@ -228,9 +181,51 @@ def calibrate(
     """
     Generate fisheye camera calibration parameters from night sky images.
 
-    IMAGE_PATHS: One or more paths to night sky images
+    IMAGE_DIR: Path to directory containing TIFF images
     """
-    calibrate_cli(image_paths, api_key, output, min_stars, star_threshold)
+    try:
+        # Find all TIFF images in the directory
+        tiff_files = list(Path(image_dir).glob("*.tiff")) + list(
+            Path(image_dir).glob("*.tif")
+        )
+
+        if not tiff_files:
+            raise click.UsageError(f"No TIFF images found in directory: {image_dir}")
+
+        logger.info(f"Found {len(tiff_files)} TIFF images in {image_dir}")
+
+        # Convert to string list
+        image_paths = [str(f) for f in tiff_files]
+
+        # Rest of the function remains the same
+        if not api_key:
+            raise click.UsageError("API key is required for plate solving")
+
+        logger.info(f"Generating calibration from {len(image_paths)} images")
+        generate_calibration_from_stars(
+            image_paths=image_paths,
+            api_key=api_key,
+            output_file=output,
+            min_stars=min_stars,
+            star_threshold=star_threshold,
+        )
+    except click.UsageError as e:
+        logger.error(f"Error: {e}")
+        raise
+    except Exception as e:
+        logger.error(f"Error generating calibration: {str(e)}")
+        raise
+        if not api_key:
+            raise click.UsageError("API key is required for plate solving")
+
+        logger.info(f"Generating calibration from {len(image_paths)} images")
+        generate_calibration_from_stars(
+            image_paths=image_paths,
+            api_key=api_key,
+            output_file=output,
+            min_stars=min_stars,
+            star_threshold=star_threshold,
+        )
 
 
 if __name__ == "__main__":
