@@ -1,15 +1,34 @@
-from .logger import logger
-from typing import Optional
 from pathlib import Path
+import time
+from typing import Optional, Tuple, Dict, List, Any
+
 from astropy.wcs import WCS
+from astropy.io import fits
 from astroquery.astrometry_net import AstrometryNet
+
+from .logger import logger
+
+def load_solution(wcs_path: str) -> Tuple[WCS, List[Dict[str, float]]]:
+    """Load a WCS solution from a FITS file."""
+    try:
+        with fits.open(wcs_path) as hdul:
+            wcs = WCS(hdul[0].header)
+            # Create a list of star coordinates (empty for now)
+            stars: List[Dict[str, float]] = []
+            return wcs, stars
+    except Exception as e:
+        logger.error(f"Failed to load WCS solution from {wcs_path}: {e}")
+        raise
+
 
 def solve_plate(
     image_path: str,
     api_key: Optional[str] = None,
+    star_threshold: float = 100,
+    min_stars: int = 5,
     max_retries: int = 30,
-    retry_delay: float = 5.0,  # seconds
-) -> WCS:
+    retry_delay: float = 5.0,
+) -> Optional[Tuple[WCS, List[Dict[str, float]]]]:
     """
     Use astrometry.net for plate solving
 
@@ -36,10 +55,15 @@ def solve_plate(
         if api_key:
             client.api_key = api_key
 
-        # Load image
-        image_path = Path(image_path)
-        if not image_path.exists():
+        # Convert to Path object
+        image_path_obj = Path(image_path)
+        if not image_path_obj.exists():
             raise ValueError(f"Image file not found: {image_path}")
+            
+        # Check if solution exists
+        solution_path = image_path_obj.with_suffix('.wcs')
+        if solution_path.exists():
+            return load_solution(str(solution_path))
 
         # Submit image to Astrometry.net
         job = client.upload(image_path)

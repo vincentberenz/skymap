@@ -7,13 +7,8 @@ import numpy as np
 
 from .calibration import generate_calibration_from_stars
 from .logger import logger
-from .mapper import (
-    convert_to_healpix,
-    correct_fisheye_distortion,
-    load_image,
-    process_image,
-)
-from .plate_solver import solve_plate
+from .mapper import process_image
+from .patches import display_patches, extract_patches_from_file
 from .utils import plot_healpix_projection, visualize_healpix_map
 
 
@@ -113,12 +108,10 @@ def visualize(
 
 
 @main.command()
-@click.argument("image-path", type=click.Path(exists=True))
-@click.option(
-    "-c", "--calibration", required=True, help="Path to fisheye calibration parameters"
-)
-@click.option("-o", "--output", required=True, help="Output file path")
-@click.option("-a", "--api-key", help="Astrometry.net API key")
+@click.argument("image_path", type=click.Path(exists=True))
+@click.argument("calibration_file", type=click.Path(exists=True))
+@click.argument("output", type=click.Path())
+@click.option("--api-key", help="Astrometry.net API key")
 def process(
     image_path: str,
     calibration_file: str,
@@ -129,9 +122,11 @@ def process(
     Process a night sky image and convert it to HEALPix format.
 
     IMAGE_PATH: Path to the input image
+    CALIBRATION_FILE: Path to the calibration file
+    OUTPUT: Output directory for results
     """
+    logger.info(f"Processing image {image_path}...")
     try:
-        logger.info(f"Processing image: {image_path}")
         healpix_map = process_tiff_image(
             image_path=image_path,
             calibration_file=calibration_file,
@@ -146,9 +141,120 @@ def process(
 
 
 @main.command()
+@click.argument(
+    "patch_dir", type=click.Path(exists=True, file_okay=False, dir_okay=True)
+)
+@click.option(
+    "--delay",
+    type=int,
+    default=0,
+    show_default=True,
+    help="Delay in milliseconds between patches (0 = wait for key press)",
+)
+def show_patches(patch_dir: str, delay: int) -> None:
+    """
+    Display all patches in a directory one by one with their metadata.
+
+    PATCH_DIR: Directory containing patch files (.npz)
+    """
+    try:
+        display_patches(patch_dir, delay)
+    except Exception as e:
+        logger.error(f"Error displaying patches: {str(e)}")
+        raise click.ClickException(str(e))
+
+
+@main.command()
 @click.argument("image_dir", type=click.Path(exists=True, file_okay=False))
 @click.option(
-    "-k", "--api-key", help="Astrometry.net API key (required for plate solving)"
+    "-o",
+    "--output",
+    default="patches",
+    show_default=True,
+    type=click.Path(dir_okay=True),
+)
+@click.option(
+    "-s",
+    "--patch-size",
+    default=500,
+    show_default=True,
+    help="Size of image patches",
+)
+@click.option(
+    "-p",
+    "--patch-overlap",
+    default=250,
+    show_default=True,
+    help="Overlap between patches",
+)
+@click.option(
+    "-m",
+    "--min-stars",
+    default=5,
+    show_default=True,
+    help="Minimum number of stars per patch",
+)
+@click.option(
+    "-t",
+    "--star-threshold",
+    default=20,
+    show_default=True,
+    help="Star detection threshold",
+)
+def generate_patches(
+    image_dir: str,
+    output: str,
+    patch_size: int,
+    patch_overlap: int,
+    min_stars: int,
+    star_threshold: int,
+) -> None:
+    """
+    Generate and save image patches for calibration.
+
+    IMAGE_DIR: Path to directory containing TIFF images
+    """
+    try:
+        # Find all TIFF images in the directory
+        tiff_files = list(Path(image_dir).glob("*.tiff")) + list(
+            Path(image_dir).glob("*.tif")
+        )
+
+        if not tiff_files:
+            raise click.UsageError(f"No TIFF images found in directory: {image_dir}")
+
+        logger.info(f"Found {len(tiff_files)} TIFF images in {image_dir}")
+
+        # Convert to string list
+        image_paths = [str(f) for f in tiff_files]
+
+        logger.info(f"Generating patches from {len(image_paths)} images")
+        total_patches = 0
+        for img_path in image_paths:
+            total_patches += extract_patches_from_file(
+                img_path,
+                patch_size,
+                patch_overlap,
+                output,
+                min_stars=min_stars,
+                star_threshold=star_threshold,
+            )
+        logger.info(f"Generated a total number of {total_patches} patches")
+    except click.UsageError as e:
+        logger.error(f"Error: {e}")
+        raise
+    except Exception as e:
+        logger.error(f"Error generating patches: {str(e)}")
+        raise
+
+
+@main.command()
+@click.argument("patch_dir", type=click.Path(exists=True, file_okay=False))
+@click.option(
+    "-k",
+    "--api-key",
+    help="Astrometry.net API key (required for plate solving)",
+    required=True,
 )
 @click.option(
     "-o",
@@ -171,18 +277,112 @@ def process(
     show_default=True,
     help="Threshold for star detection (higher value = fewer stars)",
 )
-def calibrate(
-    image_dir: str,
+def process_patches(
+    patch_dir: str,
     api_key: str,
     output: str,
     min_stars: int,
     star_threshold: float,
 ) -> None:
     """
+    Process saved patches to generate fisheye camera calibration parameters.
+
+    PATCH_DIR: Directory containing saved patches
+    """
+    try:
+        if not api_key:
+            raise click.UsageError("API key is required for plate solving")
+
+        logger.info(f"Processing patches from {patch_dir}")
+        process_patches(
+            patch_dir=patch_dir,
+            api_key=api_key,
+            output_file=output,
+            min_stars=min_stars,
+            star_threshold=star_threshold,
+        )
+    except click.UsageError as e:
+        logger.error(f"Error: {e}")
+        raise
+    except Exception as e:
+        logger.error(f"Error processing patches: {str(e)}")
+        raise
+
+
+@main.command()
+@click.argument("image_dir", type=click.Path(exists=True, file_okay=False))
+@click.option(
+    "-k",
+    "--api-key",
+    help="Astrometry.net API key (required for plate solving)",
+    required=True,
+)
+@click.option(
+    "-o",
+    "--output",
+    default="skymapper_fisheye_calibration.xml",
+    show_default=True,
+    type=click.Path(dir_okay=False),
+)
+@click.option(
+    "-s",
+    "--min-stars",
+    default=20,
+    show_default=True,
+    help="Minimum number of stars required per image patch",
+)
+@click.option(
+    "-t",
+    "--star-threshold",
+    default=100.0,
+    show_default=True,
+    help="Threshold for star detection (higher value = fewer stars)",
+)
+@click.option(
+    "-p",
+    "--patch-size",
+    default=1024,
+    show_default=True,
+    help="Size of image patches",
+)
+@click.option(
+    "-l",
+    "--patch-overlap",
+    default=256,
+    show_default=True,
+    help="Overlap between patches",
+)
+def calibrate(
+    image_dir: str,
+    api_key: str,
+    output: str,
+    min_stars: int,
+    star_threshold: float,
+    patch_size: int,
+    patch_overlap: int,
+) -> None:
+    """
     Generate fisheye camera calibration parameters from night sky images.
 
     IMAGE_DIR: Path to directory containing TIFF images
     """
+    try:
+        logger.info(f"Generating calibration from {image_dir}")
+        generate_calibration_from_stars(
+            image_paths=[str(f) for f in Path(image_dir).glob("*.tiff")],
+            api_key=api_key,
+            output_file=output,
+            min_stars=min_stars,
+            star_threshold=star_threshold,
+            patch_size=patch_size,
+            patch_overlap=patch_overlap,
+        )
+    except click.UsageError as e:
+        logger.error(f"Error: {e}")
+        raise
+    except Exception as e:
+        logger.error(f"Error generating calibration: {str(e)}")
+        raise
     try:
         # Find all TIFF images in the directory
         tiff_files = list(Path(image_dir).glob("*.tiff")) + list(
@@ -197,7 +397,6 @@ def calibrate(
         # Convert to string list
         image_paths = [str(f) for f in tiff_files]
 
-        # Rest of the function remains the same
         if not api_key:
             raise click.UsageError("API key is required for plate solving")
 

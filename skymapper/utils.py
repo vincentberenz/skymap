@@ -1,11 +1,58 @@
 from typing import Optional
 
+import cv2
 import healpy as hp
 import matplotlib.pyplot as plt
 import numpy as np
 
 from .logger import logger
-from .mapper import convert_to_healpix
+
+
+def _bits_reduction(data: np.ndarray, target: np.dtype) -> np.ndarray:
+    original_max = np.iinfo(data.dtype).max
+    target_max = np.iinfo(target).max
+    ratio = target_max / original_max
+    return (data * ratio).astype(target)
+
+
+def to_8bits(image: np.ndarray) -> np.ndarray:
+    """
+    Convert image to 8 bits (i.e. returns an array
+    of dtype numpy uint8)
+    """
+    return _bits_reduction(image, np.dtype(np.uint8))
+
+
+def load_image(image_path: str) -> np.ndarray:
+    """
+    Load and validate a 16-bit image
+
+    Parameters:
+    -----------
+    image_path : str
+        Path to the input image file
+
+    Returns:
+    --------
+    np.ndarray
+        Loaded image array
+
+    Raises:
+    ------
+    ValueError
+        If image loading fails or image is not 16-bit
+    """
+    try:
+        image = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
+        if image is None:
+            raise ValueError(f"Failed to load image: {image_path}")
+        if image.dtype != np.uint16:
+            raise ValueError("Image must be 16-bit format")
+        logger.info(f"Successfully loaded image: {image_path}")
+        return image
+    except Exception as e:
+        logger.error(f"Error loading image: {str(e)}")
+        raise
 
 
 def visualize_healpix_map(
