@@ -14,77 +14,84 @@ from .utils import load_image, to_8bits
 
 def extract_image_patches(
     image: np.ndarray,
-    patch_size: int = 512,
+    patch_size: int = 1024,
     overlap: float = 0.5,
-    min_stars: int = 5,
-    star_threshold: float = 100,
+    min_patches: int = 10,
+    color_space: str = 'bgr',
 ) -> List[Tuple[np.ndarray, int, int]]:
     """
-    Extract patches from an image for star detection
+    Extract patches from an image for processing.
 
     Parameters:
     -----------
     image : np.ndarray
-        Input image (can be grayscale or color)
-    patch_size : int
-        Size of each patch
-    overlap : float
-        Overlap ratio between patches (0.0 to 1.0)
-    min_stars : int
-        Minimum stars required in a patch
-    star_threshold : float
-        Threshold for star detection
+        Input image (grayscale or color)
+    patch_size : int, optional
+        Size of each patch in pixels, by default 1024
+    overlap : float, optional
+        Overlap ratio between patches (0.0 to 1.0), by default 0.5
+    min_patches : int, optional
+        Minimum number of patches to extract, by default 10
+    color_space : str, optional
+        Color space of the input image: 'bgr', 'rgb', or 'gray', by default 'bgr'
 
     Returns:
     --------
-    List of tuples containing (patch, x_offset, y_offset)
+    List[Tuple[np.ndarray, int, int]]
+        List of tuples containing (grayscale_patch, x_offset, y_offset)
     """
+    # Input validation
+    if len(image.shape) not in (2, 3):
+        raise ValueError(f"Expected 2D (grayscale) or 3D (color) image, got {len(image.shape)}D")
+    
+    color_space = color_space.lower()
+    if color_space not in ('bgr', 'rgb', 'gray'):
+        raise ValueError(f"color_space must be 'bgr', 'rgb', or 'gray', got '{color_space}'")
+    
+    # Convert to grayscale if needed
+    if len(image.shape) == 3:  # Color image
+        if color_space == 'bgr':
+            gray_image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        else:  # rgb or gray
+            gray_image = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+    else:  # Already grayscale
+        gray_image = image
+
     patches = []
-
-    # Handle both grayscale and color images
-    if len(image.shape) == 3:  # Color image (height, width, channels)
-        h, w = image.shape[:2]
-    else:  # Grayscale image (height, width)
-        h, w = image.shape
-
-    step = int(patch_size * (1 - overlap))
-
-    for y in range(0, h, step):
-        for x in range(0, w, step):
-            # Calculate patch bounds
-            x1 = max(0, x)
-            y1 = max(0, y)
-            x2 = min(w, x + patch_size)
-            y2 = min(h, y + patch_size)
-
-            # Extract patch
-            patch = image[y1:y2, x1:x2]
-
-            # Convert to grayscale if needed for star detection
-            if len(patch.shape) == 3:
-                gray_patch = cv2.cvtColor(patch, cv2.COLOR_BGR2GRAY)
-            else:
-                gray_patch = patch
-
-            # adding code for displaying the patch in a window, for debug
-            # cv2.imshow("Patch", patch)
-            # cv2.waitKey(0)
-            # cv2.destroyAllWindows()
-
-            # Detect stars in patch
-            _, binary = cv2.threshold(
-                gray_patch, star_threshold, 255, cv2.THRESH_BINARY
-            )
-            contours, _ = cv2.findContours(
-                binary, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE
-            )
-
-            # Count stars
-            star_count = sum(1 for contour in contours if cv2.contourArea(contour) > 10)
-
-            if star_count >= min_stars:
-                patches.append((patch, x1, y1))
-
+    h, w = gray_image.shape
+    step = max(1, int(patch_size * (1 - overlap)))
+    
+    # Ensure we get at least min_patches by adjusting step size if needed
+    if step > 1:
+        num_patches = ((w - patch_size) // step + 1) * ((h - patch_size) // step + 1)
+        if num_patches < min_patches and min_patches > 1:
+            step = int((w * h) ** 0.5 / (min_patches ** 0.5))
+            step = max(1, min(step, patch_size // 2))  # Ensure some overlap
+    
+    # Generate patches in a grid
+    for y in range(0, max(1, h - patch_size + 1), step):
+        for x in range(0, max(1, w - patch_size + 1), step):
+            x1, y1 = x, y
+            x2, y2 = min(x + patch_size, w), min(y + patch_size, h)
+            
+            # Skip if patch is too small
+            if (x2 - x1) < patch_size // 2 or (y2 - y1) < patch_size // 2:
+                continue
+                
+            patch = gray_image[y1:y2, x1:x2]
+            patches.append((patch, x1, y1))
+            
+            # Stop if we have enough patches
+            if len(patches) >= min_patches * 2:  # Get extra for selection
+                break
+        if len(patches) >= min_patches * 2:
+            break
+            
+    # If we still don't have enough patches, take the whole image as one patch
+    if not patches and h > 0 and w > 0:
+        patch = cv2.resize(gray_image, (patch_size, patch_size)) if max(h, w) > patch_size else gray_image
+        patches = [(patch, 0, 0)]
+    
     return patches
 
 
@@ -95,6 +102,7 @@ def extract_patches_from_file(
     output: str,
     min_stars: int = 5,
     star_threshold: int = 20,
+    color_space: str = 'bgr',
 ) -> int:
     img_ = load_image(img_path)
     img = to_8bits(img_)
@@ -104,6 +112,7 @@ def extract_patches_from_file(
     # Extract patches with proper parameters
     image_patches: list[tuple[np.ndarray, int, int]] = extract_image_patches(
         img,
+        color_space=color_space,
         patch_size=patch_size,
         overlap=patch_overlap / patch_size,  # Convert absolute overlap to ratio
         min_stars=min_stars,  # Minimum stars per patch

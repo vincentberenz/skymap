@@ -325,20 +325,6 @@ def process_patches(
     type=click.Path(dir_okay=False),
 )
 @click.option(
-    "-s",
-    "--min-stars",
-    default=20,
-    show_default=True,
-    help="Minimum number of stars required per image patch",
-)
-@click.option(
-    "-t",
-    "--star-threshold",
-    default=100.0,
-    show_default=True,
-    help="Threshold for star detection (higher value = fewer stars)",
-)
-@click.option(
     "-p",
     "--patch-size",
     default=1024,
@@ -367,24 +353,7 @@ def calibrate(
     IMAGE_DIR: Path to directory containing TIFF images
     """
     try:
-        logger.info(f"Generating calibration from {image_dir}")
-        generate_calibration_from_stars(
-            image_paths=[str(f) for f in Path(image_dir).glob("*.tiff")],
-            api_key=api_key,
-            output_file=output,
-            min_stars=min_stars,
-            star_threshold=star_threshold,
-            patch_size=patch_size,
-            patch_overlap=patch_overlap,
-        )
-    except click.UsageError as e:
-        logger.error(f"Error: {e}")
-        raise
-    except Exception as e:
-        logger.error(f"Error generating calibration: {str(e)}")
-        raise
-    try:
-        # Find all TIFF images in the directory
+        # Find all TIFF images in the directory (both .tiff and .tif extensions)
         tiff_files = list(Path(image_dir).glob("*.tiff")) + list(
             Path(image_dir).glob("*.tif")
         )
@@ -397,34 +366,29 @@ def calibrate(
         # Convert to string list
         image_paths = [str(f) for f in tiff_files]
 
-        if not api_key:
-            raise click.UsageError("API key is required for plate solving")
+        logger.info(
+            f"Starting calibration with {len(image_paths)} images, "
+            f"min_stars={min_stars}, patch_size={patch_size}, "
+            f"patch_overlap={patch_overlap}"
+        )
 
-        logger.info(f"Generating calibration from {len(image_paths)} images")
+        # Generate calibration using the plate solver's star detection
         generate_calibration_from_stars(
             image_paths=image_paths,
             api_key=api_key,
             output_file=output,
-            min_stars=min_stars,
-            star_threshold=star_threshold,
+            patch_size=patch_size,
+            patch_overlap=patch_overlap,
         )
+
+        logger.info(f"Successfully generated calibration file: {output}")
+
     except click.UsageError as e:
-        logger.error(f"Error: {e}")
+        logger.error(f"Usage error: {e}")
         raise
     except Exception as e:
         logger.error(f"Error generating calibration: {str(e)}")
         raise
-        if not api_key:
-            raise click.UsageError("API key is required for plate solving")
-
-        logger.info(f"Generating calibration from {len(image_paths)} images")
-        generate_calibration_from_stars(
-            image_paths=image_paths,
-            api_key=api_key,
-            output_file=output,
-            min_stars=min_stars,
-            star_threshold=star_threshold,
-        )
 
 
 if __name__ == "__main__":
