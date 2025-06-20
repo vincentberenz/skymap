@@ -8,7 +8,7 @@ import numpy as np
 from astropy.wcs import WCS
 from loguru import logger
 
-from .conversions import to_grayscale_8bits
+from .conversions import to_grayscale_8bits, stretch
 
 
 class AstrometryFailed(Exception):
@@ -64,6 +64,7 @@ class PlateSolving:
 
     @staticmethod
     def from_numpy(image: np.ndarray, cpulimit_seconds: int) -> WCS:
+       
         img = to_grayscale_8bits(image)
 
         # saving image to temporary file
