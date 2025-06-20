@@ -16,8 +16,12 @@ from skymapper.patches import PatchedImage
 # Configuration
 INPUT_IMAGE = Path("images/nightskycam3_2025_04_05_03_54_30.tiff")
 OUTPUT_PATH = INPUT_IMAGE.with_suffix(".pkl.gz")
-PATCH_SIZE = 400
-PATCH_OVERLAP = 20
+PATCH_SIZE = 500
+PATCH_OVERLAP = 10
+DEBUG_FOLDER = Path("/tmp/skymap_debug/")
+NO_PLATE_SOLVING = False
+CPULIMIT_SECONDS = 5
+NUM_PROCESSES = 8
 
 
 def main():
@@ -34,7 +38,10 @@ def main():
             INPUT_IMAGE,
             patch_size=PATCH_SIZE,
             patch_overlap=PATCH_OVERLAP,
-            num_processes=1,
+            num_processes=NUM_PROCESSES,
+            debug_folder=DEBUG_FOLDER,
+            no_plate_solving=NO_PLATE_SOLVING,
+            cpulimit_seconds=CPULIMIT_SECONDS,
         )
 
         # Save the processed image
@@ -42,15 +49,19 @@ def main():
         patched_image.dump(OUTPUT_PATH)
         logger.success(f"Successfully saved processed image to {OUTPUT_PATH}")
 
+        # Create and save visualization
+        vis_path = OUTPUT_PATH.with_name(f"{OUTPUT_PATH.stem}_visualization.tiff")
+        logger.info(f"Creating visualization: {vis_path}")
+        patched_image.display(vis_path)
+        logger.success(f"Successfully saved visualization to {vis_path}")
+
     except FileNotFoundError as e:
         logger.error(f"File not found: {e}")
         return 1
     except Exception as e:
         logger.error(f"Error processing image: {e}")
-        logger.trace("Full traceback:")
         import traceback
-
-        logger.trace(traceback.format_exc())
+        logger.error("Traceback (most recent call last):\n" + traceback.format_exc())
         return 1
 
     return 0

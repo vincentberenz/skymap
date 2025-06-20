@@ -1,5 +1,6 @@
 import numpy as np
 from loguru import logger
+from auto_stretch.stretch import Stretch
 
 
 def normalize_to_uint8(data: np.ndarray) -> np.ndarray:
@@ -40,3 +41,9 @@ def to_grayscale_8bits(image: np.ndarray) -> np.ndarray:
         return image
     else:
         raise ValueError("Image must be 2D or 3D")
+
+def stretch(image: np.ndarray) -> np.ndarray:
+    def _recast(original_img: np.ndarray, target_image: np.ndarray) -> np.ndarray:
+        return (target_image * np.iinfo(original_img.dtype).max).astype(original_img.dtype)
+
+    return _recast(image, Stretch().stretch(image))

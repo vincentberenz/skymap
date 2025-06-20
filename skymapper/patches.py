@@ -7,14 +7,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, NamedTuple, NewType, Optional, Tuple
 
+import cv2
 import imageio
 import numpy as np
 from astropy.wcs import WCS
 from loguru import logger
 from multipledispatch import dispatch
 
-from .plate_solving import AstrometryError, AstrometryFailed, plate_solving
 
+from .conversions import to_grayscale_8bits, stretch
+from .plate_solving import AstrometryError, AstrometryFailed, PlateSolving
 
 # Define a named tuple for patch arguments
 class PatchArgs(NamedTuple):
@@ -33,6 +35,9 @@ class PatchArgs(NamedTuple):
     image: np.ndarray
     patch_size: int
     index: int
+    debug_folder: Optional[str]
+    no_plate_solving: bool
+    cpulimit_seconds: Optional[int]
 
 
 Pixel = NewType("Pixel", tuple[int, int])
@@ -87,11 +92,37 @@ def _create_patch(patch_args: PatchArgs) -> Patch:
         patch_args.j : patch_args.j + patch_args.patch_size,
     ]
 
-    logger.info(f"Processing patch {patch_args.index}")
+    if patch_args.debug_folder is not None:
+        p = Path(patch_args.debug_folder)
+        p.mkdir(parents=True, exist_ok=True)
+        patch_path = p / f"patch_{patch_args.index}_{patch_args.i}_{patch_args.j}.tiff"
+        logger.debug(f"saving patch {patch_args.index} {patch_args.i} {patch_args.j} to {p}")
+        imageio.imwrite(
+            patch_path,
+            patch_data,
+        )
+
+    logger.info(
+        f"Processing patch {patch_args.index} / {patch_data.shape} / {patch_data.dtype}"
+    )
+
+    if patch_args.no_plate_solving:
+        logger.info(f"Plate solving disabled, skipping")
+        return Patch(
+            location=(patch_args.i, patch_args.j),
+            size=(patch_args.patch_size, patch_args.patch_size),
+            index=patch_args.index,
+            wcs=None,
+        )
 
     try:
         # Solve the plate for this patch
-        wcs = plate_solving(patch_data)
+        cpulimit = (
+            0 if patch_args.cpulimit_seconds is None else patch_args.cpulimit_seconds
+        )
+
+        wcs = PlateSolving.from_numpy(patch_data, cpulimit)
+
         logger.info(f"Successfully solved patch {patch_args.index}")
         return Patch(
             location=Pixel((patch_args.i, patch_args.j)),
@@ -117,6 +148,109 @@ def _create_patch(patch_args: PatchArgs) -> Patch:
 class PatchedImage:
     patches: list[Patch]
     image: np.ndarray
+
+    def display(self, path: Path, border_thickness: int = 2, text_scale: float = 0.8, text_thickness: int = 2, apply_stretch: bool = True) -> None:
+        """
+        Dump into path a tiff image encoding the image attribute on which
+        the border of the patches are displayed. The borders are displayed in green
+        for solved patches and red for unsolved patches, with patch indices in the center.
+
+        Args:
+            path: Path where to save the visualization image
+            border_thickness: Thickness of the border in pixels
+            text_scale: Font scale factor for the index numbers
+            text_thickness: Thickness of the text for index numbers
+
+        Raises:
+            IOError: If there's an error writing the image file
+        """
+
+        if apply_stretch:
+            vis_image = stretch(self.image)
+        else:
+            vis_image = self.image
+
+        vis_image = to_grayscale_8bits(vis_image)
+
+        
+        # Convert to BGR color space for OpenCV
+        if len(vis_image.shape) == 2:  # Grayscale
+            vis_image = cv2.cvtColor(vis_image, cv2.COLOR_GRAY2BGR)
+        elif vis_image.shape[2] == 1:  # Single channel
+            vis_image = cv2.cvtColor(vis_image, cv2.COLOR_GRAY2BGR)
+        elif vis_image.shape[2] == 4:  # RGBA
+            vis_image = cv2.cvtColor(vis_image, cv2.COLOR_RGBA2BGR)
+        elif vis_image.shape[2] == 3:  # RGB
+            vis_image = cv2.cvtColor(vis_image, cv2.COLOR_RGB2BGR)
+    
+        # Draw borders and indices for each patch
+        for patch in self.patches:
+            i, j = patch.location
+            h, w = patch.size
+            
+            # Determine colors (green for solved, red for unsolved)
+            # OpenCV uses BGR color order
+            is_solved = patch.wcs is not None
+            color = (0, 255, 0) if is_solved else (0, 0, 255)  # Green for solved, red for unsolved
+            text_color = color  # Use the same color as the border
+            
+            logger.debug(f"Drawing border for patch {patch.index} at ({i}, {j}) with color {color}")
+            
+            # Draw rectangle borders
+            # Top border
+            cv2.rectangle(vis_image, 
+                        (j, i),  # Top-left corner
+                        (j + w - 1, i + border_thickness - 1),  # Bottom-right corner
+                        color, 
+                        -1)  # Filled rectangle
+            
+            # Bottom border
+            cv2.rectangle(vis_image, 
+                        (j, i + h - border_thickness), 
+                        (j + w - 1, i + h - 1), 
+                        color, 
+                        -1)
+            
+            # Left border
+            cv2.rectangle(vis_image, 
+                        (j, i + border_thickness), 
+                        (j + border_thickness - 1, i + h - border_thickness - 1), 
+                        color, 
+                        -1)
+            
+            # Right border
+            cv2.rectangle(vis_image, 
+                        (j + w - border_thickness, i + border_thickness), 
+                        (j + w - 1, i + h - border_thickness - 1), 
+                        color, 
+                        -1)
+            
+            # Add index number in the center of the patch
+            text = str(patch.index)
+            text_size = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, text_scale, text_thickness)[0]
+            text_x = j + (w - text_size[0]) // 2
+            text_y = i + (h + text_size[1]) // 2
+            
+            # Add a small padding around the text for better visibility
+            padding = 5
+            cv2.rectangle(vis_image,
+                        (text_x - padding, text_y - text_size[1] - padding),
+                        (text_x + text_size[0] + padding, text_y + padding),
+                        (0, 0, 0),  # Black background
+                        -1)
+            
+            # Draw the index number
+            cv2.putText(vis_image, 
+                       text, 
+                       (text_x, text_y), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 
+                       text_scale, 
+                       text_color, 
+                       text_thickness)
+
+        # Save the visualization
+        path.parent.mkdir(parents=True, exist_ok=True)
+        cv2.imwrite(str(path), vis_image)
 
     def dump(self, path: Path) -> None:
         """
@@ -146,7 +280,7 @@ class PatchedImage:
                     protocol=pickle.HIGHEST_PROTOCOL,
                 )
 
-            logger.info(f"Successfully saved PatchedImage to {path}")
+            logger.info(f"Successfully saved PatchedImage to {path} ({len(self.patches)} patches)")
 
         except (IOError, pickle.PickleError) as e:
             logger.error(f"Failed to save PatchedImage to {path}: {str(e)}")
@@ -182,7 +316,7 @@ class PatchedImage:
             if not all(key in data for key in ["patches", "image"]):
                 raise KeyError("Loaded data is missing required fields")
 
-            logger.info(f"Successfully loaded PatchedImage from {path}")
+            logger.info(f"Successfully loaded PatchedImage from {path} ({len(data['patches'])} patches)")
             return cls(patches=data["patches"], image=data["image"])
 
         except (IOError, pickle.PickleError, KeyError) as e:
@@ -215,6 +349,9 @@ class PatchedImage:
         patch_size: int,
         patch_overlap: int,
         num_processes: Optional[int] = get_num_processes(),
+        debug_folder: Optional[Path] = None,
+        no_plate_solving: bool = False,
+        cpulimit_seconds: Optional[int] = None,
     ) -> "PatchedImage":
         # read an image file and calls from_image
         image = imageio.imread(path)
@@ -223,6 +360,9 @@ class PatchedImage:
             patch_size=patch_size,
             patch_overlap=patch_overlap,
             num_processes=num_processes,
+            debug_folder=debug_folder,
+            no_plate_solving=no_plate_solving,
+            cpulimit_seconds=cpulimit_seconds,
         )
 
     @classmethod
@@ -232,6 +372,9 @@ class PatchedImage:
         patch_size: int,
         patch_overlap: int,
         num_processes: Optional[int] = get_num_processes(),
+        debug_folder: Optional[Path] = None,
+        no_plate_solving: bool = False,
+        cpulimit_seconds: Optional[int] = None,
     ) -> "PatchedImage":
         """
         Create a PatchedImage by dividing the input image into overlapping patches.
@@ -253,8 +396,10 @@ class PatchedImage:
         if num_processes is None:
             num_processes = 1
 
+        img = to_grayscale_8bits(image)
+
         # Calculate patch coordinates
-        height, width = image.shape[:2]
+        height, width = img.shape[:2]
         step = patch_size - patch_overlap
 
         # Generate all possible patch starting coordinates
@@ -265,9 +410,14 @@ class PatchedImage:
                 args = PatchArgs(
                     i=i,
                     j=j,
-                    image=image,
+                    image=img,
                     patch_size=patch_size,
                     index=index,
+                    debug_folder=(
+                        str(debug_folder) if debug_folder is not None else None
+                    ),
+                    no_plate_solving=no_plate_solving,
+                    cpulimit_seconds=cpulimit_seconds,
                 )
                 patch_args.append(args)
                 index += 1
@@ -286,11 +436,11 @@ class PatchedImage:
 
         # Filter out patches where plate solving failed
         solved_patches = [p for p in patches if p.wcs is not None]
-        if not solved_patches:
+        if (not no_plate_solving) and (not solved_patches):
             raise AstrometryError(b"", b"All patches failed plate solving", 1)
 
         # Sort patches by their index to ensure consistent ordering
-        solved_patches.sort(key=lambda p: p.index)
+        patches.sort(key=lambda p: p.index)
 
         logger.info(f"Successfully solved {len(solved_patches)}/{len(patches)} patches")
-        return cls(solved_patches, image)
+        return cls(patches, image)
