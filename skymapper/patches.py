@@ -1,191 +1,296 @@
+import gzip
+import multiprocessing as mp
 import os
+import pickle
+from collections import namedtuple
+from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Tuple, Optional, Dict, Any
+from typing import Any, Dict, NamedTuple, NewType, Optional, Tuple
 
-import cv2
+import imageio
 import numpy as np
-from rich.console import Console
-from rich.panel import Panel
-from rich.text import Text
+from astropy.wcs import WCS
+from loguru import logger
+from multipledispatch import dispatch
 
-from .logger import logger
-from .utils import load_image, to_8bits
+from .plate_solving import AstrometryError, AstrometryFailed, plate_solving
 
 
-def extract_image_patches(
-    image: np.ndarray,
-    patch_size: int = 1024,
-    overlap: float = 0.5,
-    min_patches: int = 10,
-    color_space: str = 'bgr',
-) -> List[Tuple[np.ndarray, int, int]]:
+# Define a named tuple for patch arguments
+class PatchArgs(NamedTuple):
+    """Container for patch creation arguments.
+
+    Attributes:
+        i: Starting row index of the patch
+        j: Starting column index of the patch
+        image: The full image array
+        patch_size: Size of the patch (width and height)
+        index: Unique identifier for the patch
     """
-    Extract patches from an image for processing.
 
-    Parameters:
-    -----------
-    image : np.ndarray
-        Input image (grayscale or color)
-    patch_size : int, optional
-        Size of each patch in pixels, by default 1024
-    overlap : float, optional
-        Overlap ratio between patches (0.0 to 1.0), by default 0.5
-    min_patches : int, optional
-        Minimum number of patches to extract, by default 10
-    color_space : str, optional
-        Color space of the input image: 'bgr', 'rgb', or 'gray', by default 'bgr'
+    i: int
+    j: int
+    image: np.ndarray
+    patch_size: int
+    index: int
+
+
+Pixel = NewType("Pixel", tuple[int, int])
+
+
+def get_num_processes() -> int:
+    cpu_count = os.cpu_count()
+    if cpu_count is None:
+        return 1
+    cpu_count = 1 if cpu_count == 1 else cpu_count - 1
+    return cpu_count
+
+
+@dataclass
+class Patch:
+    index: int
+    location: Pixel
+    size: tuple[int, int]
+    wcs: Optional[WCS]
+
+    def inside(self, pixel: Pixel) -> bool:
+        return (
+            self.location[0] <= pixel[0] < self.location[0] + self.size[0]
+            and self.location[1] <= pixel[1] < self.location[1] + self.size[1]
+        )
+
+    def distance_to_center(self, pixel: Pixel) -> float:
+        return np.sqrt(
+            (pixel[0] - self.location[0]) ** 2 + (pixel[1] - self.location[1]) ** 2
+        )
+
+    def get_center(self) -> Pixel:
+        return Pixel(
+            (self.location[0] + self.size[0] // 2, self.location[1] + self.size[1] // 2)
+        )
+
+
+def _create_patch(patch_args: PatchArgs) -> Patch:
+    """Helper function to create and solve a single patch.
+
+    This is a module-level function to support multiprocessing.
+
+    Args:
+        patch_args: Named tuple containing patch creation arguments
 
     Returns:
-    --------
-    List[Tuple[np.ndarray, int, int]]
-        List of tuples containing (grayscale_patch, x_offset, y_offset)
+        Patch object with WCS solution if successful, None otherwise
     """
-    # Input validation
-    if len(image.shape) not in (2, 3):
-        raise ValueError(f"Expected 2D (grayscale) or 3D (color) image, got {len(image.shape)}D")
-    
-    color_space = color_space.lower()
-    if color_space not in ('bgr', 'rgb', 'gray'):
-        raise ValueError(f"color_space must be 'bgr', 'rgb', or 'gray', got '{color_space}'")
-    
-    # Convert to grayscale if needed
-    if len(image.shape) == 3:  # Color image
-        if color_space == 'bgr':
-            gray_image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        else:  # rgb or gray
-            gray_image = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
-    else:  # Already grayscale
-        gray_image = image
 
-    patches = []
-    h, w = gray_image.shape
-    step = max(1, int(patch_size * (1 - overlap)))
-    
-    # Ensure we get at least min_patches by adjusting step size if needed
-    if step > 1:
-        num_patches = ((w - patch_size) // step + 1) * ((h - patch_size) // step + 1)
-        if num_patches < min_patches and min_patches > 1:
-            step = int((w * h) ** 0.5 / (min_patches ** 0.5))
-            step = max(1, min(step, patch_size // 2))  # Ensure some overlap
-    
-    # Generate patches in a grid
-    for y in range(0, max(1, h - patch_size + 1), step):
-        for x in range(0, max(1, w - patch_size + 1), step):
-            x1, y1 = x, y
-            x2, y2 = min(x + patch_size, w), min(y + patch_size, h)
-            
-            # Skip if patch is too small
-            if (x2 - x1) < patch_size // 2 or (y2 - y1) < patch_size // 2:
-                continue
-                
-            patch = gray_image[y1:y2, x1:x2]
-            patches.append((patch, x1, y1))
-            
-            # Stop if we have enough patches
-            if len(patches) >= min_patches * 2:  # Get extra for selection
-                break
-        if len(patches) >= min_patches * 2:
-            break
-            
-    # If we still don't have enough patches, take the whole image as one patch
-    if not patches and h > 0 and w > 0:
-        patch = cv2.resize(gray_image, (patch_size, patch_size)) if max(h, w) > patch_size else gray_image
-        patches = [(patch, 0, 0)]
-    
-    return patches
+    patch_data = patch_args.image[
+        patch_args.i : patch_args.i + patch_args.patch_size,
+        patch_args.j : patch_args.j + patch_args.patch_size,
+    ]
+
+    logger.info(f"Processing patch {patch_args.index}")
+
+    try:
+        # Solve the plate for this patch
+        wcs = plate_solving(patch_data)
+        logger.info(f"Successfully solved patch {patch_args.index}")
+        return Patch(
+            location=Pixel((patch_args.i, patch_args.j)),
+            size=(patch_args.patch_size, patch_args.patch_size),
+            index=patch_args.index,
+            wcs=wcs,
+        )
+    except (AstrometryError, AstrometryFailed) as e:
+        logger.warning(
+            f"Failed to solve patch {patch_args.index} at "
+            f"({patch_args.i}, {patch_args.j}): {str(e)}"
+        )
+        # Return a patch without WCS if solving fails
+        return Patch(
+            location=(patch_args.i, patch_args.j),
+            size=(patch_args.patch_size, patch_args.patch_size),
+            index=patch_args.index,
+            wcs=None,
+        )
 
 
-def extract_patches_from_file(
-    img_path: str,
-    patch_size: int,
-    patch_overlap: int,
-    output: str,
-    min_stars: int = 5,
-    star_threshold: int = 20,
-    color_space: str = 'bgr',
-) -> int:
-    img_ = load_image(img_path)
-    img = to_8bits(img_)
-    logger.info(
-        f"Extracting patches from {Path(img_path).stem} ({img.shape}, {img.dtype})"
-    )
-    # Extract patches with proper parameters
-    image_patches: list[tuple[np.ndarray, int, int]] = extract_image_patches(
-        img,
-        color_space=color_space,
-        patch_size=patch_size,
-        overlap=patch_overlap / patch_size,  # Convert absolute overlap to ratio
-        min_stars=min_stars,  # Minimum stars per patch
-        star_threshold=star_threshold,  # Default star detection threshold
-    )
-    logger.info(f"Extracted {len(image_patches)} patches from {img_path}")
-    # Save patches to output directory
-    for i, (patch, x, y) in enumerate(image_patches):
-        patch_path = Path(output) / f"{Path(img_path).stem}_{i:03d}.npz"
-        logger.info(f"Saving patch {patch_path.stem} ({patch.shape}, {patch.dtype})")
-        patch_path.parent.mkdir(parents=True, exist_ok=True)
-        np.savez(str(patch_path), patch=patch, x=x, y=y)
-    return len(image_patches)
+@dataclass
+class PatchedImage:
+    patches: list[Patch]
+    image: np.ndarray
 
+    def dump(self, path: Path) -> None:
+        """
+        Serialize the PatchedImage instance to a file using pickle.
 
-def display_patches(patch_dir: str, delay: int = 0) -> None:
-    """
-    Display all patches in a directory one by one with their metadata.
+        Args:
+            path: Path where to save the serialized PatchedImage
 
-    Parameters:
-    -----------
-    patch_dir : str
-        Directory containing patch files (.npz)
-    delay : int, optional
-        Delay in milliseconds between patches (0 = wait for key press)
-    """
-    console = Console()
-    patch_files = sorted(Path(patch_dir).glob("*.npz"))
-    
-    if not patch_files:
-        logger.warning(f"No .npz files found in {patch_dir}")
-        return
+        Raises:
+            IOError: If there's an error writing to the file
+            pickle.PickleError: If serialization fails
+        """
 
-    console.print(f"Found {len(patch_files)} patch files in {patch_dir}")
-    
-    for i, patch_file in enumerate(patch_files, 1):
         try:
-            # Load patch data
-            data = np.load(patch_file)
-            patch = data['patch']
-            x = data.get('x', 0)
-            y = data.get('y', 0)
-            
-            # Prepare metadata
-            metadata = {
-                "File": patch_file.name,
-                "Dimensions": f"{patch.shape[1]}x{patch.shape[0]}",
-                "Type": str(patch.dtype),
-                "Position": f"({x}, {y})",
-                "Patch": f"{i}/{len(patch_files)}"
-            }
-            
-            # Display metadata
-            console.rule(f"[bold]Patch {i}/{len(patch_files)}")
-            for key, value in metadata.items():
-                console.print(f"[bold cyan]{key}:[/] {value}")
-            
-            # Display the patch
-            window_name = f"Patch {i}/{len(patch_files)} - {patch_file.name}"
-            cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
-            cv2.imshow(window_name, patch)
-            
-            # Wait for key press or delay
-            key = cv2.waitKey(delay) & 0xFF
-            cv2.destroyAllWindows()
-            
-            # Exit on 'q' or ESC
-            if key in (ord('q'), 27):
-                console.print("[yellow]Display interrupted by user[/]")
-                break
-                
-        except Exception as e:
-            logger.error(f"Error displaying {patch_file}: {str(e)}")
-    
-    cv2.destroyAllWindows()
-    console.print("[green]Finished displaying all patches[/]")
+            # Create parent directories if they don't exist
+            path = Path(path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+
+            # Use gzip compression for smaller file size
+            with gzip.open(path, "wb") as f:
+                pickle.dump(
+                    {
+                        "patches": self.patches,
+                        "image": self.image,
+                    },
+                    f,
+                    protocol=pickle.HIGHEST_PROTOCOL,
+                )
+
+            logger.info(f"Successfully saved PatchedImage to {path}")
+
+        except (IOError, pickle.PickleError) as e:
+            logger.error(f"Failed to save PatchedImage to {path}: {str(e)}")
+            raise
+
+    @classmethod
+    def load(cls, path: Path) -> "PatchedImage":
+        """
+        Deserialize a PatchedImage instance from a file.
+
+        Args:
+            path: Path to the serialized PatchedImage file
+
+        Returns:
+            PatchedImage: The deserialized PatchedImage instance
+
+        Raises:
+            FileNotFoundError: If the file doesn't exist
+            IOError: If there's an error reading the file
+            pickle.PickleError: If deserialization fails
+            KeyError: If the file is missing required data
+        """
+
+        path = Path(path)
+        if not path.exists():
+            raise FileNotFoundError(f"File not found: {path}")
+
+        try:
+            with gzip.open(path, "rb") as f:
+                data = pickle.load(f)
+
+            # Validate the loaded data
+            if not all(key in data for key in ["patches", "image"]):
+                raise KeyError("Loaded data is missing required fields")
+
+            logger.info(f"Successfully loaded PatchedImage from {path}")
+            return cls(patches=data["patches"], image=data["image"])
+
+        except (IOError, pickle.PickleError, KeyError) as e:
+            logger.error(f"Failed to load PatchedImage from {path}: {str(e)}")
+            raise
+
+    def get_patch(self, pixels: Pixel) -> Patch:
+        candidates = [patch for patch in self.patches if patch.inside(pixels)]
+        if not candidates:
+            raise ValueError(f"No patch found for pixels {pixels}")
+        return min(candidates, key=lambda patch: patch.distance_to_center(pixels))
+
+    @dispatch(int)
+    def get_image(self, patch_index: int) -> np.ndarray:
+        patch = self.patches[patch_index]
+        return self.image[
+            patch.location[0] : patch.location[0] + patch.size[0],
+            patch.location[1] : patch.location[1] + patch.size[1],
+        ]
+
+    @dispatch(tuple)  # Changed from Pixel to tuple to avoid NewType dispatch issues
+    def get_image(self, pixel: tuple[int, int]) -> np.ndarray:
+        patch = self.get_patch(pixel)
+        return self.get_image(patch.index)
+
+    @classmethod
+    def from_file(
+        cls,
+        path: Path,
+        patch_size: int,
+        patch_overlap: int,
+        num_processes: Optional[int] = get_num_processes(),
+    ) -> "PatchedImage":
+        # read an image file and calls from_image
+        image = imageio.imread(path)
+        return cls.from_image(
+            image,
+            patch_size=patch_size,
+            patch_overlap=patch_overlap,
+            num_processes=num_processes,
+        )
+
+    @classmethod
+    def from_image(
+        cls,
+        image: np.ndarray,
+        patch_size: int,
+        patch_overlap: int,
+        num_processes: Optional[int] = get_num_processes(),
+    ) -> "PatchedImage":
+        """
+        Create a PatchedImage by dividing the input image into overlapping patches.
+        Uses multiprocessing to speed up patch creation and plate solving.
+
+        Args:
+            image: Input image as a numpy array
+            patch_size: Size of each square patch in pixels
+            patch_overlap: Overlap between adjacent patches in pixels
+            num_processes: Number of processes to use for parallel processing.
+                        If None, uses all available CPU cores.
+
+        Returns:
+            PatchedImage instance containing all patches with WCS solutions
+
+        Raises:
+            AstrometryError: If plate solving fails for any patch
+        """
+        if num_processes is None:
+            num_processes = 1
+
+        # Calculate patch coordinates
+        height, width = image.shape[:2]
+        step = patch_size - patch_overlap
+
+        # Generate all possible patch starting coordinates
+        patch_args = []
+        index = 0
+        for i in range(0, height - patch_size + 1, step):
+            for j in range(0, width - patch_size + 1, step):
+                args = PatchArgs(
+                    i=i,
+                    j=j,
+                    image=image,
+                    patch_size=patch_size,
+                    index=index,
+                )
+                patch_args.append(args)
+                index += 1
+
+        logger.info(f"Plate solving running for {len(patch_args)} patches")
+
+        # Create and solve patches in parallel
+        patches = []
+        if num_processes == 1 or len(patch_args) == 1:
+            # Single process for small number of patches or when requested
+            patches = [_create_patch(args) for args in patch_args]
+        else:
+            # Use multiprocessing
+            with mp.Pool(processes=num_processes) as pool:
+                patches = list(pool.imap(_create_patch, patch_args))
+
+        # Filter out patches where plate solving failed
+        solved_patches = [p for p in patches if p.wcs is not None]
+        if not solved_patches:
+            raise AstrometryError(b"", b"All patches failed plate solving", 1)
+
+        # Sort patches by their index to ensure consistent ordering
+        solved_patches.sort(key=lambda p: p.index)
+
+        logger.info(f"Successfully solved {len(solved_patches)}/{len(patches)} patches")
+        return cls(solved_patches, image)
