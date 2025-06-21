@@ -17,6 +17,11 @@ imageio = "^2.37.0"
 multipledispatch = "^1.0.0"
 opencv-python = "^4.11.0.86"
 auto-stretch = "^0.0.3"
+scikit-image = "^0.25.2"
+defisheye = "^1.4.1"
+setuptools = "^80.9.0"
+astropy-healpix = "^1.1.2"
+healpy = "^1.18.1"
 
 [tool.poetry.scripts]
 skymapper = "skymapper.main:main"

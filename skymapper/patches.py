@@ -6,7 +6,7 @@ from collections import namedtuple
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, NamedTuple, NewType, Optional, Tuple
-
+import healpy 
 import cv2
 import imageio
 import numpy as np
@@ -26,14 +26,17 @@ class PatchArgs(NamedTuple):
         i: Starting row index of the patch
         j: Starting column index of the patch
         image: The full image array
-        patch_size: Size of the patch (width and height)
+        patch_size: Tuple of (height, width) for the patch
         index: Unique identifier for the patch
+        debug_folder: Optional folder for debug output
+        no_plate_solving: If True, skip plate solving
+        cpulimit_seconds: CPU time limit for plate solving
     """
 
     i: int
     j: int
     image: np.ndarray
-    patch_size: int
+    patch_size: tuple[int, int]
     index: int
     debug_folder: Optional[str]
     no_plate_solving: bool
@@ -52,11 +55,44 @@ def get_num_processes() -> int:
 
 
 @dataclass
+class HealpixPatch:
+    data: np.ndarray[tuple[int], np.uint8]
+    mask: np.ndarray[tuple[int], np.bool]
+
+@dataclass
 class Patch:
     index: int
     location: Pixel
     size: tuple[int, int]
     wcs: Optional[WCS]
+
+    def to_healpix(self, image: np.ndarray, nside: int) -> HealpixPatch:
+
+        # returns a 1d numpy array, one element per (healpix) pixel in the patch
+
+        # get the numpy view of the patch
+        patch = image[self.location[0] : self.location[0] + self.size[0], self.location[1] : self.location[1] + self.size[1]]
+
+        # compute sky coordinates from each pixel in patch
+        h, w = patch.shape[:2]
+        x, y = np.meshgrid(np.arange(w), np.arange(h))
+        x = x.flatten()
+        y = y.flatten()
+        sky_coords = self.wcs.pixel_to_world(x, y)
+
+        # convert sky coordinates to healpix indices
+        healpix_indices = healpy.ang2pix(nside, sky_coords.ra.deg, sky_coords.dec.deg, nest=True)
+
+        # mapping sky_coords to a one dimensional numpy array based on healpix_indices
+        healpix_array = np.zeros(healpy.nside2npix(nside), dtype=np.uint8)
+        healpix_array[healpix_indices] = patch
+
+        # mask: indices for which we have no data
+        mask = np.zeros(healpy.nside2npix(nside), dtype=np.bool)
+        mask[healpix_indices] = True
+
+        return HealpixPatch(data=healpix_array, mask=mask)    
+
 
     def inside(self, pixel: Pixel) -> bool:
         return (
@@ -86,21 +122,16 @@ def _create_patch(patch_args: PatchArgs) -> Patch:
     Returns:
         Patch object with WCS solution if successful, None otherwise
     """
-
+    patch_height, patch_width = patch_args.patch_size
     patch_data = patch_args.image[
-        patch_args.i : patch_args.i + patch_args.patch_size,
-        patch_args.j : patch_args.j + patch_args.patch_size,
+        patch_args.i : patch_args.i + patch_height,
+        patch_args.j : patch_args.j + patch_width,
     ]
 
     if patch_args.debug_folder is not None:
         p = Path(patch_args.debug_folder)
         p.mkdir(parents=True, exist_ok=True)
-        patch_path = p / f"patch_{patch_args.index}_{patch_args.i}_{patch_args.j}.tiff"
-        logger.debug(f"saving patch {patch_args.index} {patch_args.i} {patch_args.j} to {p}")
-        imageio.imwrite(
-            patch_path,
-            patch_data,
-        )
+        imageio.imwrite(p / f"patch_{patch_args.index:04d}.tiff", patch_data)
 
     logger.info(
         f"Processing patch {patch_args.index} / {patch_data.shape} / {patch_data.dtype}"
@@ -110,7 +141,7 @@ def _create_patch(patch_args: PatchArgs) -> Patch:
         logger.info(f"Plate solving disabled, skipping")
         return Patch(
             location=(patch_args.i, patch_args.j),
-            size=(patch_args.patch_size, patch_args.patch_size),
+            size=patch_args.patch_size,
             index=patch_args.index,
             wcs=None,
         )
@@ -126,7 +157,7 @@ def _create_patch(patch_args: PatchArgs) -> Patch:
         logger.info(f"Successfully solved patch {patch_args.index}")
         return Patch(
             location=Pixel((patch_args.i, patch_args.j)),
-            size=(patch_args.patch_size, patch_args.patch_size),
+            size=patch_args.patch_size,
             index=patch_args.index,
             wcs=wcs,
         )
@@ -138,16 +169,52 @@ def _create_patch(patch_args: PatchArgs) -> Patch:
         # Return a patch without WCS if solving fails
         return Patch(
             location=(patch_args.i, patch_args.j),
-            size=(patch_args.patch_size, patch_args.patch_size),
+            size=patch_args.patch_size,
             index=patch_args.index,
             wcs=None,
         )
 
 
 @dataclass
+class HealpixPatchedImage:
+    data: np.ndarray[tuple[int, int], np.uint8]
+    mask: np.ndarray[tuple[int, int], np.bool]
+
+
+@dataclass
 class PatchedImage:
     patches: list[Patch]
     image: np.ndarray
+
+    def to_healpix(self, nside: int) -> HealpixPatchedImage:
+
+        # returns a 2d numpy array, one line per patch (calling to_healpix on each patch)
+
+        # filtering out patches with no WCS
+        patches = [p for p in self.patches if p.wcs is not None]
+
+        # image should be uint8 and grayscale
+        img = to_grayscale_8bits(self.image)
+
+        logger.info(f"Converting {len(patches)} patches to healpix 2d array (1 line per patch)")
+        logger.info(f"Using image of shape {img.shape} and type {img.dtype}")
+
+        # create a 2d numpy array, one line per patch (calling to_healpix on each patch)
+        healpix_array = np.zeros((len(patches), healpy.nside2npix(nside)), dtype=np.uint8)
+        healpix_mask = np.zeros((len(patches), healpy.nside2npix(nside)), dtype=np.bool)
+        for i, patch in enumerate(patches):
+            logger.info(f"Converting patch {patch.index} to healpix")
+            try:
+                healpix_data: HealpixPatch = patch.to_healpix(img, nside)
+                healpix_array[i] = healpix_data.data
+                healpix_mask[i] = healpix_data.mask
+            except Exception as e:
+                logger.error(f"Failed to convert patch {patch.index} to healpix: {str(e)}")
+                healpix_array[i] = np.zeros(healpy.nside2npix(nside), dtype=np.uint8)
+                healpix_mask[i] = np.zeros(healpy.nside2npix(nside), dtype=np.bool)
+
+        return HealpixPatchedImage(data=healpix_array, mask=healpix_mask)
+        
 
     def display(self, path: Path, border_thickness: int = 2, text_scale: float = 0.8, text_thickness: int = 2, apply_stretch: bool = True) -> None:
         """
@@ -346,19 +413,29 @@ class PatchedImage:
     def from_file(
         cls,
         path: Path,
-        patch_size: int,
-        patch_overlap: int,
+        patch_size: tuple[int, int],
         num_processes: Optional[int] = get_num_processes(),
         debug_folder: Optional[Path] = None,
         no_plate_solving: bool = False,
         cpulimit_seconds: Optional[int] = None,
     ) -> "PatchedImage":
-        # read an image file and calls from_image
+        """Create a PatchedImage from an image file.
+        
+        Args:
+            path: Path to the image file
+            patch_size: Tuple of (height, width) for each patch
+            num_processes: Number of processes to use for parallel processing
+            debug_folder: Optional folder for debug output
+            no_plate_solving: If True, skip plate solving
+            cpulimit_seconds: CPU time limit for plate solving
+            
+        Returns:
+            PatchedImage instance with automatically computed patch overlap
+        """
         image = imageio.imread(path)
         return cls.from_image(
-            image,
+            image=image,
             patch_size=patch_size,
-            patch_overlap=patch_overlap,
             num_processes=num_processes,
             debug_folder=debug_folder,
             no_plate_solving=no_plate_solving,
@@ -369,23 +446,25 @@ class PatchedImage:
     def from_image(
         cls,
         image: np.ndarray,
-        patch_size: int,
-        patch_overlap: int,
+        patch_size: tuple[int, int],
         num_processes: Optional[int] = get_num_processes(),
         debug_folder: Optional[Path] = None,
         no_plate_solving: bool = False,
         cpulimit_seconds: Optional[int] = None,
     ) -> "PatchedImage":
         """
-        Create a PatchedImage by dividing the input image into overlapping patches.
+        Create a PatchedImage by dividing the input image into overlapping rectangular patches.
         Uses multiprocessing to speed up patch creation and plate solving.
+        The overlap between patches is automatically computed to ensure full image coverage.
 
         Args:
             image: Input image as a numpy array
-            patch_size: Size of each square patch in pixels
-            patch_overlap: Overlap between adjacent patches in pixels
+            patch_size: Tuple of (height, width) for each patch in pixels
             num_processes: Number of processes to use for parallel processing.
                         If None, uses all available CPU cores.
+            debug_folder: Optional folder to save debug information
+            no_plate_solving: If True, skip plate solving
+            cpulimit_seconds: CPU time limit for plate solving
 
         Returns:
             PatchedImage instance containing all patches with WCS solutions
@@ -397,30 +476,63 @@ class PatchedImage:
             num_processes = 1
 
         img = to_grayscale_8bits(image)
-
-        # Calculate patch coordinates
+        patch_height, patch_width = patch_size
         height, width = img.shape[:2]
-        step = patch_size - patch_overlap
+        
+        # Calculate number of patches needed in each dimension
+        num_patches_y = max(1, (height + patch_height - 1) // patch_height)
+        num_patches_x = max(1, (width + patch_width - 1) // patch_width)
+        
+        # Calculate required overlap to ensure full coverage
+        if num_patches_y > 1:
+            overlap_y = (patch_height * num_patches_y - height) / (num_patches_y - 1)
+            overlap_y = int(np.ceil(overlap_y))  # Round up to ensure coverage
+            step_y = patch_height - overlap_y
+        else:
+            step_y = 0
+            
+        if num_patches_x > 1:
+            overlap_x = (patch_width * num_patches_x - width) / (num_patches_x - 1)
+            overlap_x = int(np.ceil(overlap_x))  # Round up to ensure coverage
+            step_x = patch_width - overlap_x
+        else:
+            step_x = 0
+            
+        logger.debug(f"Using patch size: {patch_size}")
+        logger.debug(f"Image size: {img.shape}")
+        logger.debug(f"Number of patches: {num_patches_y}x{num_patches_x}")
+        logger.debug(f"Computed overlap: y={overlap_y}, x={overlap_x}")
+        logger.debug(f"Step sizes: y={step_y}, x={step_x}")
 
-        # Generate all possible patch starting coordinates
+        # Generate all possible patch coordinates
         patch_args = []
         index = 0
-        for i in range(0, height - patch_size + 1, step):
-            for j in range(0, width - patch_size + 1, step):
-                args = PatchArgs(
-                    i=i,
-                    j=j,
-                    image=img,
-                    patch_size=patch_size,
-                    index=index,
-                    debug_folder=(
-                        str(debug_folder) if debug_folder is not None else None
-                    ),
-                    no_plate_solving=no_plate_solving,
-                    cpulimit_seconds=cpulimit_seconds,
+        for y in range(0, height - patch_height + 1, step_y):
+            for x in range(0, width - patch_width + 1, step_x):
+                # Calculate actual patch dimensions (may be smaller at edges)
+                actual_height = min(patch_height, height - y)
+                actual_width = min(patch_width, width - x)
+                
+                patch_args.append(
+                    PatchArgs(
+                        i=y,
+                        j=x,
+                        image=img,
+                        patch_size=(actual_height, actual_width),
+                        index=index,
+                        debug_folder=str(debug_folder) if debug_folder else None,
+                        no_plate_solving=no_plate_solving,
+                        cpulimit_seconds=cpulimit_seconds,
+                    )
                 )
-                patch_args.append(args)
                 index += 1
+                
+                # If we've reached the end of the row, break to avoid extra patches
+                if x + step_x >= width - patch_width + 1:
+                    break
+            # If we've reached the end of the column, break to avoid extra patches
+            if y + step_y >= height - patch_height + 1:
+                break
 
         logger.info(f"Plate solving running for {len(patch_args)} patches")
 
