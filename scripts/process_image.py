@@ -16,7 +16,10 @@ from skymapper.patches import PatchedImage
 # Configuration
 INPUT_IMAGE = Path("images/nightskycam3_2025_04_05_03_54_30.tiff")
 OUTPUT_PATH = INPUT_IMAGE.with_suffix(".pkl.gz")
-PATCH_SIZE = [250,250]
+
+# to update: mix of patch sizes depending on the image area
+PATCH_SIZE = [300,300]
+
 DEBUG_FOLDER = Path("/tmp/skymap_debug/")
 NO_PLATE_SOLVING = False
 CPULIMIT_SECONDS = 5

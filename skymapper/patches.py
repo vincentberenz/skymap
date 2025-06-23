@@ -6,7 +6,7 @@ from collections import namedtuple
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, NamedTuple, NewType, Optional, Tuple
-import healpy 
+import healpy as hp
 import cv2
 import imageio
 import numpy as np
@@ -66,33 +66,69 @@ class Patch:
     size: tuple[int, int]
     wcs: Optional[WCS]
 
+    def to_healpix_not_vectorized(self, image: np.ndarray, nside: int) -> HealpixPatch:
+
+        npix = healpy.nside2npix(nside)
+        healpix_map = np.zeros(npix, dtype=np.uint8)
+        healpix_mask = np.zeros(npix, dtype=np.bool)
+
+        image_data = image[
+            self.location[0] : self.location[0] + self.size[0], 
+            self.location[1] : self.location[1] + self.size[1]
+        ]
+
+        for y in range(image_data.shape[0]):
+            for x in range(image_data.shape[1]):
+                # Get the pixel value
+                pixel_value = image_data[y, x]
+
+                # Convert pixel coordinates to celestial coordinates
+                ra, dec = self.wcs.wcs_pix2world(x, y, 0)
+
+                # Convert celestial coordinates to HEALPix index
+                theta = np.radians(90 - dec)
+                phi = np.radians(ra)
+                hp_index = healpy.ang2pix(nside, theta, phi)
+
+                # Accumulate the pixel value into the HEALPix map
+                healpix_map[hp_index] += pixel_value
+                healpix_mask[hp_index] = True
+
+        return HealpixPatch(data=healpix_map, mask=healpix_mask)    
+
     def to_healpix(self, image: np.ndarray, nside: int) -> HealpixPatch:
-
-        # returns a 1d numpy array, one element per (healpix) pixel in the patch
-
-        # get the numpy view of the patch
-        patch = image[self.location[0] : self.location[0] + self.size[0], self.location[1] : self.location[1] + self.size[1]]
-
-        # compute sky coordinates from each pixel in patch
-        h, w = patch.shape[:2]
-        x, y = np.meshgrid(np.arange(w), np.arange(h))
-        x = x.flatten()
-        y = y.flatten()
-        sky_coords = self.wcs.pixel_to_world(x, y)
-
-        # convert sky coordinates to healpix indices
-        healpix_indices = healpy.ang2pix(nside, sky_coords.ra.deg, sky_coords.dec.deg, nest=True)
-
-        # mapping sky_coords to a one dimensional numpy array based on healpix_indices
-        healpix_array = np.zeros(healpy.nside2npix(nside), dtype=np.uint8)
-        healpix_array[healpix_indices] = patch
-
-        # mask: indices for which we have no data
-        mask = np.zeros(healpy.nside2npix(nside), dtype=np.bool)
-        mask[healpix_indices] = True
-
-        return HealpixPatch(data=healpix_array, mask=mask)    
-
+        npix = hp.nside2npix(nside)
+        healpix_map = np.zeros(npix, dtype=np.uint8)
+        healpix_mask = np.zeros(npix, dtype=bool)
+        
+        # Extract the relevant portion of the image
+        image_data = image[
+            self.location[0]:self.location[0] + self.size[0],
+            self.location[1]:self.location[1] + self.size[1]
+        ]
+        
+        # Generate pixel coordinates
+        y_indices, x_indices = np.indices(image_data.shape)
+        
+        # Convert pixel coordinates to celestial coordinates
+        ra, dec = self.wcs.wcs_pix2world(x_indices, y_indices, 0)
+        
+        # Convert celestial coordinates to HEALPix indices
+        theta = np.radians(90 - dec)
+        phi = np.radians(ra)
+        hp_indices = hp.ang2pix(nside, theta, phi)
+        
+        # Flatten the arrays to ensure compatibility
+        hp_indices = hp_indices.flatten()
+        image_data_flat = image_data.flatten()
+        
+        # Accumulate the pixel values into the HEALPix map
+        np.add.at(healpix_map, hp_indices, image_data_flat)
+        
+        # Create the mask
+        healpix_mask[hp_indices] = True
+        
+        return HealpixPatch(data=healpix_map, mask=healpix_mask)
 
     def inside(self, pixel: Pixel) -> bool:
         return (
@@ -186,35 +222,31 @@ class PatchedImage:
     patches: list[Patch]
     image: np.ndarray
 
-    def to_healpix(self, nside: int) -> HealpixPatchedImage:
+    def to_healpix(self, nside: int, patches: Optional[tuple[int,...]] = None) -> np.ndarray[tuple[int], np.float32]:
 
         # returns a 2d numpy array, one line per patch (calling to_healpix on each patch)
 
-        # filtering out patches with no WCS
-        patches = [p for p in self.patches if p.wcs is not None]
+        if patches is not None:
+            _patches = [p for p in self.patches if p.index in patches]
+        else:
+            _patches = [p for p in self.patches if p.wcs is not None]
 
         # image should be uint8 and grayscale
         img = to_grayscale_8bits(self.image)
 
-        logger.info(f"Converting {len(patches)} patches to healpix 2d array (1 line per patch)")
-        logger.info(f"Using image of shape {img.shape} and type {img.dtype}")
+        npix = hp.nside2npix(nside)
+        healpix_map = np.zeros(npix, dtype=np.float32)
 
-        # create a 2d numpy array, one line per patch (calling to_healpix on each patch)
-        healpix_array = np.zeros((len(patches), healpy.nside2npix(nside)), dtype=np.uint8)
-        healpix_mask = np.zeros((len(patches), healpy.nside2npix(nside)), dtype=np.bool)
-        for i, patch in enumerate(patches):
-            logger.info(f"Converting patch {patch.index} to healpix")
-            try:
-                healpix_data: HealpixPatch = patch.to_healpix(img, nside)
-                healpix_array[i] = healpix_data.data
-                healpix_mask[i] = healpix_data.mask
-            except Exception as e:
-                logger.error(f"Failed to convert patch {patch.index} to healpix: {str(e)}")
-                healpix_array[i] = np.zeros(healpy.nside2npix(nside), dtype=np.uint8)
-                healpix_mask[i] = np.zeros(healpy.nside2npix(nside), dtype=np.bool)
+        for i, patch in enumerate(_patches):
+            logger.info(f"Processing patch {i} / {len(_patches)} (patch: {patch.index})")
+            healpix_patch = patch.to_healpix(img, nside)
+            # updating value in healpix_map: average of current value and patch value where mask is True
+            healpix_map[healpix_patch.mask] = (
+                healpix_map[healpix_patch.mask] + healpix_patch.data[healpix_patch.mask]
+            ) / 2
 
-        return HealpixPatchedImage(data=healpix_array, mask=healpix_mask)
-        
+        return healpix_map
+
 
     def display(self, path: Path, border_thickness: int = 2, text_scale: float = 0.8, text_thickness: int = 2, apply_stretch: bool = True) -> None:
         """
