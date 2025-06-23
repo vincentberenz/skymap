@@ -18,7 +18,7 @@ def main():
     """Load a PatchedImage and generate its visualization."""
     try:
         logger.info(f"Loading PatchedImage from: {INPUT_FILE}")
-        
+       
         patched_image = PatchedImage.load(INPUT_FILE)
        
         logger.info(f"Loaded PatchedImage with {len(patched_image.patches)} patches and image of shape {patched_image.image.shape}")

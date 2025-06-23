@@ -15,6 +15,7 @@ from loguru import logger
 from multipledispatch import dispatch
 
 
+
 from .conversions import to_grayscale_8bits, stretch
 from .plate_solving import AstrometryError, AstrometryFailed, PlateSolving
 
@@ -65,6 +66,85 @@ class Patch:
     location: Pixel
     size: tuple[int, int]
     wcs: Optional[WCS]
+
+    def get_image(self, image: np.ndarray) -> np.ndarray:
+        return image[
+            self.location[0] : self.location[0] + self.size[0], 
+            self.location[1] : self.location[1] + self.size[1]
+        ]
+
+    def get_resolution(self) -> float:
+        try:
+            # Try to get the CD matrix
+            cd_matrix = self.wcs.wcs.cd
+        except AttributeError:
+            # If CD is not available, try to get the PC matrix
+            cd_matrix = self.wcs.wcs.pc
+        
+        # If neither CD nor PC is available, assume a default resolution
+        if cd_matrix is None:
+            logger.warning("WCS object lacks CD matrix. Using default resolution.")
+            # This is a fallback; adjust as needed for your specific case
+            return 1.0  # Default resolution in arcseconds
+    
+        # Convert degrees to arcseconds
+        return cd_matrix[0][0] * 3600  # Assuming x-pixel size
+
+
+    def get_extents(self) -> tuple[float, float, float, float]:
+        try:
+            crpix = self.wcs.wcs.crpix
+            crval = self.wcs.wcs.crval
+            cd = self.wcs.wcs.cd
+        except AttributeError as e:
+            logger.warning(f"WCS object lacks some attributes. Error: {e}")
+            # Fallback method if we don't have CD matrix
+            ra_min = crpix[0] - 10 * np.sqrt(crpix[0]**2 + crpix[1]**2)
+            ra_max = crpix[0] + 10 * np.sqrt(crpix[0]**2 + crpix[1]**2)
+            dec_min = crpix[1] - 10 * abs(crpix[0])
+            dec_max = crpix[1] + 10 * abs(crpix[0])
+        else:
+            # Using the standard method when CD is available
+            ra_min = crpix[0] - cd[0][0] * crval[0]
+            ra_max = crpix[0] + cd[0][0] * (crval[0] + cd[1][1] * crval[1])
+            dec_min = crpix[1] - cd[1][1] * crval[1]
+            dec_max = crpix[1] + cd[1][1] * (crval[1] + cd[0][0] * crval[0])
+
+        return ra_min, ra_max, dec_min, dec_max
+    
+    def update_healpix(
+        self, image: np.ndarray, nside: int, map: np.ndarray[tuple[int], np.uint8], 
+    ) -> np.ndarray[tuple[int], np.uint8]:
+       
+
+        npix = hp.nside2npix(nside)
+
+        image_data = self.get_image(image)
+
+        logger.info(f"updating healpix map for patch {self.index}. Original image: {image.shape}, patch image: {image_data.shape}")
+
+        updated_indices: set[int] = set()
+
+        for y in range(image_data.shape[0]):
+            for x in range(image_data.shape[1]):
+                # Get the pixel value
+                pixel_value = image_data[y, x]
+
+                # Convert pixel coordinates to celestial coordinates
+                ra, dec = self.wcs.wcs_pix2world(x, y, 0)
+
+                # Convert celestial coordinates to HEALPix index
+                theta = np.radians(90 - dec)
+                phi = np.radians(ra)
+                hp_index = hp.ang2pix(nside, theta, phi)
+
+                # Accumulate the pixel value into the HEALPix map
+                map[hp_index] = pixel_value
+                updated_indices.add(hp_index)
+
+        logger.info(f"Updated {len(updated_indices)} indices out of {image_data.shape[0]*image_data.shape[1]} (npix={npix})")
+
+        return map
 
     def to_healpix_not_vectorized(self, image: np.ndarray, nside: int) -> HealpixPatch:
 
@@ -145,6 +225,50 @@ class Patch:
         return Pixel(
             (self.location[0] + self.size[0] // 2, self.location[1] + self.size[1] // 2)
         )
+
+
+def calculate_output_shape(patches: list[Patch])->tuple[int,int]:
+
+    total_ra_min = float('inf')
+    total_ra_max = float('-inf')
+    total_dec_min = float('inf')
+    total_dec_max = float('-inf')
+
+    for patch in patches:
+        ra_min, ra_max, dec_min, dec_max = patch.get_extents()
+        
+        total_ra_min = min(total_ra_min, ra_min)
+        total_ra_max = max(total_ra_max, ra_max)
+        total_dec_min = min(total_dec_min, dec_min)
+        total_dec_max = max(total_dec_max, dec_max)
+
+    # Calculate the total extent in RA and Dec
+    total_extent_ra = total_ra_max - total_ra_min
+    total_extent_dec = total_dec_max - total_dec_min
+
+    # Extract resolution from the first image's WCS
+    current_resolution = patches[0].get_resolution()
+    logger.info(f"Resolution: {current_resolution}")
+
+    # Use the extracted resolution for our calculation
+    num_pixels_ra = int(np.ceil(total_extent_ra / current_resolution))
+    num_pixels_dec = int(np.ceil(total_extent_dec / current_resolution))
+
+    return num_pixels_ra, num_pixels_dec
+
+
+def combine_images(patches: list[Patch], full_image: np.ndarray)->tuple[np.ndarray, WCS]:
+    reference_wcs = patches[0].wcs
+    output_shape = calculate_output_shape(patches)
+    combined_images = np.zeros(output_shape, dtype=full_image.dtype)
+
+    for patch in patches:
+        image = patch.get_image(full_image)
+        reprojected_image, _ = reproject_interp((image, patch.wcs), reference_wcs, shape_out=output_shape)
+        combined_images += reprojected_image
+
+    return combined_images, reference_wcs
+    
 
 
 def _create_patch(patch_args: PatchArgs) -> Patch:
@@ -235,17 +359,14 @@ class PatchedImage:
         img = to_grayscale_8bits(self.image)
 
         npix = hp.nside2npix(nside)
-        healpix_map = np.zeros(npix, dtype=np.float32)
+
+        map = np.full(npix, hp.UNSEEN, dtype=np.uint8)
 
         for i, patch in enumerate(_patches):
-            logger.info(f"Processing patch {i} / {len(_patches)} (patch: {patch.index})")
-            healpix_patch = patch.to_healpix(img, nside)
-            # updating value in healpix_map: average of current value and patch value where mask is True
-            healpix_map[healpix_patch.mask] = (
-                healpix_map[healpix_patch.mask] + healpix_patch.data[healpix_patch.mask]
-            ) / 2
+            logger.info(f"Processing patch {i+1} / {len(_patches)} (patch: {patch.index})")
+            map = patch.update_healpix(img, nside, map)
 
-        return healpix_map
+        return map
 
 
     def display(self, path: Path, border_thickness: int = 2, text_scale: float = 0.8, text_thickness: int = 2, apply_stretch: bool = True) -> None:
@@ -422,15 +543,18 @@ class PatchedImage:
             logger.error(f"Failed to load PatchedImage from {path}: {str(e)}")
             raise
 
-    def get_patch(self, pixels: Pixel) -> Patch:
+    def get_corresponding_patch(self, pixels: Pixel) -> Patch:
         candidates = [patch for patch in self.patches if patch.inside(pixels)]
         if not candidates:
             raise ValueError(f"No patch found for pixels {pixels}")
         return min(candidates, key=lambda patch: patch.distance_to_center(pixels))
 
+    def get_patch(self, index: int) -> Patch:
+        return [p for p in self.patches if p.index == index][0]
+
     @dispatch(int)
     def get_image(self, patch_index: int) -> np.ndarray:
-        patch = self.patches[patch_index]
+        patch = [p for p in self.patches if p.index == patch_index][0]
         return self.image[
             patch.location[0] : patch.location[0] + patch.size[0],
             patch.location[1] : patch.location[1] + patch.size[1],
