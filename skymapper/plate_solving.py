@@ -11,6 +11,14 @@ from loguru import logger
 from .conversions import to_grayscale_8bits, stretch
 
 
+def get_num_processes() -> int:
+    cpu_count = os.cpu_count()
+    if cpu_count is None:
+        return 1
+    cpu_count = 1 if cpu_count == 1 else cpu_count - 1
+    return cpu_count
+
+
 class AstrometryFailed(Exception):
     pass
 
@@ -25,7 +33,7 @@ class AstrometryError(Exception):
 class PlateSolving:
 
     @staticmethod
-    def from_file(filepath: Path, cpulimit_seconds: int) -> WCS:
+    def from_file(filepath: Path, cpulimit_seconds: int, working_dir: Path) -> WCS:
         """Run Astrometry.net's `solve-field` command and return the WCS
 
         Args:
@@ -39,36 +47,31 @@ class PlateSolving:
             AstrometryError: If solving failed with an error
         """
 
-        with tempfile.TemporaryDirectory() as tmp_dir:
+        wcs_file = working_dir / f"{filepath.stem}.wcs"
+        solved_file = working_dir / f"{filepath.stem}.solved"
 
-            solved_file = Path(tmp_dir) / "astrometry.solved"
-            wcs_file = Path(tmp_dir) / "astrometry.wcs"
+        command = ["solve-field","--overwrite"]
+        if cpulimit_seconds > 0:
+            command.extend(["--cpulimit", str(cpulimit_seconds)])
+        command.extend(["--dir", str(working_dir), "-o", str(filepath.stem), str(filepath)])
 
-            command = ["solve-field"]
-            if cpulimit_seconds > 0:
-                command.extend(["--cpulimit", str(cpulimit_seconds)])
-            command.extend(["--dir", tmp_dir, "-o", "astrometry", str(filepath)])
-
-            try:
-                run(
-                    command,
-                    capture_output=True,
-                    check=True,
-                )
-                if solved_file.exists():
-                    return WCS(str(wcs_file))
-                else:
-                    raise AstrometryFailed()
-            except CalledProcessError as e:
-                raise AstrometryError(e.stdout, e.stderr, e.returncode)
+        try:
+            run(
+                command,
+                capture_output=True,
+                check=True,
+            )
+            if solved_file.exists():
+                return WCS(str(wcs_file))
+            else:
+                raise AstrometryFailed()
+        except CalledProcessError as e:
+            raise AstrometryError(e.stdout, e.stderr, e.returncode)
 
     @staticmethod
-    def from_numpy(image: np.ndarray, cpulimit_seconds: int) -> WCS:
-       
+    def from_numpy(filename: str, image: np.ndarray, cpulimit_seconds: int, working_dir: Path) -> WCS:
+        working_dir.mkdir(parents=True, exist_ok=True)
         img = to_grayscale_8bits(image)
-
-        # saving image to temporary file
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            image_path = Path(tmp_dir) / "image.tiff"
-            imageio.imwrite(image_path, img, format="tiff")
-            return PlateSolving.from_file(image_path, cpulimit_seconds)
+        image_path = working_dir / f"{filename}.jpeg"
+        imageio.imwrite(image_path, img, format="jpeg")
+        return PlateSolving.from_file(image_path, cpulimit_seconds, working_dir)

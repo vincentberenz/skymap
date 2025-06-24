@@ -3,6 +3,18 @@ from loguru import logger
 from auto_stretch.stretch import Stretch
 
 
+def normalize_to_float32(data: np.ndarray)->np.ndarray:
+    logger.debug(f"Normalizing to float32: {data.dtype}")
+    min_ = np.iinfo(data.dtype).min
+    max_ = np.iinfo(data.dtype).max
+    
+    # Convert to float32 and scale to preserve dynamic range
+    arr_float = data.astype(np.float32)
+    arr_float = (arr_float - min_) / (max_ - min_)
+    
+    return arr_float
+
+
 def normalize_to_uint8(data: np.ndarray) -> np.ndarray:
     """Normalize image data to 8-bit range (0-255)"""
     if data.dtype == np.uint8:

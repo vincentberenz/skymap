@@ -73,3 +73,8 @@ examples/
 *.png
 *.npy
 *.fits
+
+
+images/jpgHiPS
+images/full_night
+images/jpg

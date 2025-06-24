@@ -20,7 +20,7 @@ OUTPUT_PATH = INPUT_IMAGE.with_suffix(".pkl.gz")
 # to update: mix of patch sizes depending on the image area
 PATCH_SIZE = [300,300]
 
-DEBUG_FOLDER = Path("/tmp/skymap_debug/")
+WORKING_DIR = Path("/tmp/skymap_debug/")
 NO_PLATE_SOLVING = False
 CPULIMIT_SECONDS = 5
 NUM_PROCESSES = 8
@@ -40,7 +40,7 @@ def main():
             INPUT_IMAGE,
             patch_size=PATCH_SIZE,
             num_processes=NUM_PROCESSES,
-            debug_folder=DEBUG_FOLDER,
+            working_dir=WORKING_DIR,
             no_plate_solving=NO_PLATE_SOLVING,
             cpulimit_seconds=CPULIMIT_SECONDS,
         )
