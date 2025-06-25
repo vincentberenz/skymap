@@ -23,3 +23,16 @@ class PatchArgs(NamedTuple):
     no_plate_solving: bool
     cpulimit_seconds: Optional[int]
     working_dir: str
+
+    def get_image(self) -> np.ndarray:
+        # must be robust to 3 channel RGB images
+        if len(self.image.shape)==2:
+            return self.image[
+                self.location[0] : self.location[0] + self.size[0], 
+                self.location[1] : self.location[1] + self.size[1],
+            ]
+        return self.image[
+            self.location[0] : self.location[0] + self.size[0], 
+            self.location[1] : self.location[1] + self.size[1],
+            :
+        ]

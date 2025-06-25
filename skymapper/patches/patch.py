@@ -113,12 +113,8 @@ class Patch:
         Returns:
             Patch object with WCS solution if successful, None otherwise
         """
-        patch_height, patch_width = patch_args.size
-        patch_data = patch_args.image[
-            patch_args.location[0] : patch_args.location[0] + patch_height,
-            patch_args.location[1] : patch_args.location[1] + patch_width,
-        ]
-
+        patch_data = patch_args.get_image()
+        
         logger.info(
             f"Processing patch {patch_args.index} / {patch_data.shape} / {patch_data.dtype}"
         )
