@@ -14,17 +14,17 @@ from loguru import logger
 from skymapper.patches import PatchedImage
 
 # Configuration
-INPUT_FOLDER = Path("images/full_night/")
-OUTPUT_DIR = INPUT_FOLDER / "full_night"
+INPUT_FOLDER = Path("/home/vberenz/Workspaces/skymap-data/june_19_2025/ns3/originals")
+OUTPUT_DIR = Path("/home/vberenz/Workspaces/skymap-data/june_19_2025/ns3/astrometry")
 EXTENSION = "tiff"
 
 # to update: mix of patch sizes depending on the image area
 PATCH_SIZE = [500,500]
 
-WORKING_DIR = Path("/tmp/skymap_full_night/")
+WORKING_DIR = Path("/home/vberenz/Workspaces/skymap-data/june_19_2025/ns3/process")
 NO_PLATE_SOLVING = False
 CPULIMIT_SECONDS = 5
-NUM_PROCESSES = 7
+NUM_PROCESSES = 40
 
 
 def main():

@@ -16,6 +16,7 @@ class PatchArgs(NamedTuple):
         cpulimit_seconds: CPU time limit for plate solving
     """
 
+    label: str
     location: Pixel
     size: Size
     image: np.ndarray

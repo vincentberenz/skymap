@@ -23,7 +23,7 @@ PATCH_SIZE = [500,500]
 WORKING_DIR = Path("/tmp/skymap_debug/")
 NO_PLATE_SOLVING = False
 CPULIMIT_SECONDS = 5
-NUM_PROCESSES = 8
+NUM_PROCESSES = 40 
 
 
 def main():
