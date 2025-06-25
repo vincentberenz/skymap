@@ -13,6 +13,7 @@ from ..conversions import normalize_to_uint8
 from .patch_types import Pixel, Size, HEALPixDict, HEALPixNside
 from .patch_args import PatchArgs
 from ..plate_solving import PlateSolving, AstrometryError, AstrometryFailed
+from ..image import ImageData
 
 @dataclass
 class Patch:
@@ -38,6 +39,8 @@ class Patch:
         npix = hp.nside2npix(nside)
         image_data = self.get_image(image)
         r: HEALPixDict = {}
+        indices: set[int] = set()
+        duplicates: int = 0
         for y in range(image_data.shape[0]):
             for x in range(image_data.shape[1]):
                 pixel_value = image_data[y, x]
@@ -50,7 +53,10 @@ class Patch:
                 phi = np.radians(ra)
                 hp_index = hp.ang2pix(nside, theta, phi)
                 r[hp_index] = pixel_value
-
+                if hp_index in indices:
+                    duplicates += 1
+                indices.add(hp_index)
+        logger.warning(f"nside: {nside}: Patch {self.index} has {duplicates} duplicate pixels / {image_data.shape[0]*image_data.shape[1]} total pixels")
         return r    
 
     def to_jpeg(self, image: np.ndarray, target_dir: Path)->None:
@@ -113,11 +119,12 @@ class Patch:
         Returns:
             Patch object with WCS solution if successful, None otherwise
         """
-        patch_data = patch_args.get_image()
         
         logger.info(
-            f"Processing patch {patch_args.index} / {patch_data.shape} / {patch_data.dtype}"
+            f"Processing patch {patch_args.index}"
         )
+
+        image_data: ImageData = patch_args.get_image()
 
         if patch_args.no_plate_solving:
             logger.info(f"Plate solving disabled, skipping")
@@ -134,7 +141,7 @@ class Patch:
                 0 if patch_args.cpulimit_seconds is None else patch_args.cpulimit_seconds
             )
 
-            wcs = PlateSolving.from_numpy(patch_args.label, patch_data, cpulimit, Path(patch_args.working_dir))
+            wcs = PlateSolving.from_numpy(patch_args.label, image_data, cpulimit, Path(patch_args.working_dir))
 
             logger.info(f"Successfully solved patch {patch_args.index}")
             return Patch(

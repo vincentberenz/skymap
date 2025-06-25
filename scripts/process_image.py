@@ -6,24 +6,32 @@ This script loads a TIFF image, processes it into patches with plate solving,
 and saves the resulting PatchedImage to a file.
 """
 
+from pickle import FALSE
 import sys
 from pathlib import Path
-
+import numpy as np
 from loguru import logger
 
 from skymapper.patches import PatchedImage
+from skymapper.image import ImageConfig
 
 # Configuration
-INPUT_IMAGE = Path("images/nightskycam3_2025_04_05_03_54_30.tiff")
-OUTPUT_PATH = INPUT_IMAGE.with_suffix(".pkl.gz")
+INPUT_IMAGE = Path("/home/vberenz/Workspaces/skymap-data/one-night/ns5/original/nightskycam5_2025_06_20_02_42_30.tiff")
+OUTPUT_PATH = Path("/home/vberenz/Workspaces/skymap-data/one-night/ns5/astrometry/patches/nightskycam5_2025_06_20_02_42_30.pkl.gz")
 
 # to update: mix of patch sizes depending on the image area
 PATCH_SIZE = [500,500]
 
-WORKING_DIR = Path("/tmp/skymap_debug/")
+STRETCH = True
+GRAYSCALE = True
+DTYPE = np.uint8
+IMAGE_CONFIG = ImageConfig(STRETCH, GRAYSCALE, DTYPE)
+
+WORKING_DIR = Path("/home/vberenz/Workspaces/skymap-data/one-night/ns5/astrometry/process/")
+
 NO_PLATE_SOLVING = False
 CPULIMIT_SECONDS = 5
-NUM_PROCESSES = 40 
+NUM_PROCESSES = 7
 
 
 def main():
@@ -40,6 +48,7 @@ def main():
             patch_size=PATCH_SIZE,
             num_processes=NUM_PROCESSES,
             working_dir=WORKING_DIR,
+            image_config=IMAGE_CONFIG,
             no_plate_solving=NO_PLATE_SOLVING,
             cpulimit_seconds=CPULIMIT_SECONDS,
         )

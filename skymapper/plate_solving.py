@@ -7,7 +7,7 @@ import imageio
 import numpy as np
 from astropy.wcs import WCS
 from loguru import logger
-
+from .image import ImageData
 from .conversions import normalize_to_uint8, to_grayscale_8bits, stretch
 
 
@@ -69,12 +69,7 @@ class PlateSolving:
             raise AstrometryError(e.stdout, e.stderr, e.returncode)
 
     @staticmethod
-    def from_numpy(filename: str, image: np.ndarray, cpulimit_seconds: int, working_dir: Path) -> WCS:
+    def from_numpy(filename: str, image_data: ImageData, cpulimit_seconds: int, working_dir: Path) -> WCS:
         working_dir.mkdir(parents=True, exist_ok=True)
-        display_img = normalize_to_uint8(stretch(image))
-        display_img_path = working_dir / f"{filename}_display.jpeg"
-        img = to_grayscale_8bits(image)
-        image_path = working_dir / f"{filename}.jpeg"
-        imageio.imwrite(display_img_path, display_img, format="jpeg")
-        imageio.imwrite(image_path, img, format="jpeg")
+        image_path = image_data.save(working_dir, filename)
         return PlateSolving.from_file(image_path, cpulimit_seconds, working_dir)

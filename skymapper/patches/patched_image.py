@@ -17,8 +17,10 @@ from ..conversions import normalize_to_uint8, stretch, to_grayscale_8bits
 from .patch import Patch
 from .patch_args import PatchArgs
 from .patch_coords import PatchCoords
-from .patch_types import HEALPixDict, HEALPixNside, Pixel, Size, Shape
+from .patch_types import Pixel, Size, Shape
+from ..healpix import HEALPixDict, HEALPixNside, save_healpix_dict, HEALPixDictRecord
 from ..plate_solving import AstrometryError, AstrometryFailed
+from ..image import ImageConfig, ImageData
 
 def get_num_processes() -> int:
     """Get the number of processes to use for parallel processing.
@@ -47,6 +49,9 @@ class PatchedImage:
         for patch in patches:
             patch.to_jpeg(image,target_dir)
             patch.to_wcs(target_dir)
+
+    def get_patch_indices(self)->list[int]:
+        return [p.index for p in self.patches if p.wcs is not None]
 
     def display(
         self, path: Path, border_thickness: int = 2, text_scale: float = 0.8, 
@@ -253,6 +258,7 @@ class PatchedImage:
         path: Path,
         patch_size: tuple[int, int],
         working_dir: Path,
+        image_config: ImageConfig,
         num_processes: Optional[int] = get_num_processes(),
         no_plate_solving: bool = False,
         cpulimit_seconds: Optional[int] = None,
@@ -276,6 +282,7 @@ class PatchedImage:
             image=image,
             patch_size=patch_size,
             working_dir=working_dir,
+            image_config = image_config,
             num_processes=num_processes,
             no_plate_solving=no_plate_solving,
             cpulimit_seconds=cpulimit_seconds,
@@ -288,6 +295,7 @@ class PatchedImage:
         image: np.ndarray,
         patch_size: tuple[int, int],
         working_dir: Path,
+        image_config: ImageConfig,
         num_processes: Optional[int] = get_num_processes(),
         no_plate_solving: bool = False,
         cpulimit_seconds: Optional[int] = None,
@@ -312,6 +320,9 @@ class PatchedImage:
         Raises:
             AstrometryError: If plate solving fails for any patch
         """
+
+        image_data = ImageData(image, image_config)
+
         if num_processes is None:
             num_processes = 1
        
@@ -324,7 +335,7 @@ class PatchedImage:
                     label=f"{label}_{index}",
                     location=(patch.location[0],patch.location[1]),
                     size=(patch.size[0], patch.size[1]),
-                    image=image,
+                    image_data=image_data,
                     index=index,
                     no_plate_solving=no_plate_solving,
                     cpulimit_seconds=cpulimit_seconds,
@@ -362,6 +373,7 @@ class PatchedImage:
         patch_size: tuple[int, int],
         working_dir: Path,
         output_dir: Path,
+        image_config: ImageConfig,
         num_processes: Optional[int] = get_num_processes(),
         no_plate_solving: bool = False,
         cpulimit_seconds: Optional[int] = None,
@@ -376,7 +388,10 @@ class PatchedImage:
 
             logger.info(f"Running patch generation and plate solving for {image_file.stem} ({index+1}/{len(image_files)})")
 
-            patched_image = cls.from_file(image_file, patch_size, working_dir, num_processes, no_plate_solving, cpulimit_seconds)
+            patched_image = cls.from_file(
+                image_file, patch_size, working_dir, image_config, 
+                num_processes, no_plate_solving, cpulimit_seconds
+            )
 
             output_path = output_dir / f"{image_file.stem}.pkl.gz"
             logger.info(f"Saving processed image to: {output_path}")
@@ -387,3 +402,68 @@ class PatchedImage:
             logger.info(f"Creating visualization: {vis_path}")
             patched_image.display(vis_path)
 
+    def _process_patch_healpix(self, args: tuple[Patch, HEALPixNside]) -> HEALPixDict:
+        """Helper function to process a single patch's HEALPix data.
+        
+        Args:
+            args: Tuple of (patch, nside)
+            
+        Returns:
+            HEALPixDict containing the patch's HEALPix data
+        """
+        patch, nside, image = args
+        return patch.get_healpix_dict(nside, image)
+
+    def get_healpix_record(
+        self, nside: HEALPixNside, 
+        num_processes: Optional[int] = None, 
+        output_path: Optional[Path] = None,
+        patch_indices: Optional[list[int]] = None
+    ) -> HEALPixDictRecord:
+        """Get a dictionary mapping HEALPix indices to pixel values.
+        
+        Args:
+            nside: HEALPix nside parameter
+            num_processes: Number of processes to use for parallel processing.
+                         If None, uses all available CPU cores.
+                         
+        Returns:
+            Dictionary mapping HEALPix indices to pixel values
+        """
+        if num_processes is None:
+            num_processes = 1
+
+        # Filter out patches without WCS solutions
+        if patch_indices is None:
+            valid_patches = [p for p in self.patches if p.wcs is not None]
+        else:
+            valid_patches = [p for p in self.patches if p.wcs is not None and p.index in patch_indices]
+
+
+        if not valid_patches:
+            logger.warning("No patches with valid WCS solutions found")
+            return {}
+            
+        # Prepare arguments for each patch
+        args = [(patch, nside, self.image) for patch in valid_patches]
+        
+        # Use multiprocessing for large numbers of patches
+        if len(valid_patches) > 1 and num_processes > 1:
+            logger.info(f"Processing {len(valid_patches)} patches with {num_processes} processes")
+            with mp.Pool(processes=num_processes) as pool:
+                results = pool.map(self._process_patch_healpix, args)
+        else:
+            # Process serially for small numbers of patches or when num_processes=1
+            results = [self._process_patch_healpix(arg) for arg in args]
+        
+        # Combine results from all patches
+        healpix_dict: HEALPixDict = {}
+        for result in results:
+            healpix_dict.update(result)
+            
+        logger.info(f"Generated HEALPix dictionary with {len(healpix_dict)} entries")
+
+        if output_path is not None:
+            save_healpix_dict(nside, healpix_dict, output_path)
+
+        return nside, healpix_dict
