@@ -138,7 +138,7 @@ class Patch:
                 0 if patch_args.cpulimit_seconds is None else patch_args.cpulimit_seconds
             )
 
-            wcs = PlateSolving.from_numpy(f"patch_{patch_args.index}", patch_data, cpulimit, Path(patch_args.working_dir))
+            wcs = PlateSolving.from_numpy(patch_args.label, patch_data, cpulimit, Path(patch_args.working_dir))
 
             logger.info(f"Successfully solved patch {patch_args.index}")
             return Patch(

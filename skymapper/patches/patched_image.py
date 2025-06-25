@@ -272,6 +272,7 @@ class PatchedImage:
         """
         image = imageio.imread(path)
         return cls.from_image(
+            label=str(path.stem),
             image=image,
             patch_size=patch_size,
             working_dir=working_dir,
@@ -283,6 +284,7 @@ class PatchedImage:
     @classmethod
     def from_image(
         cls,
+        label: str,
         image: np.ndarray,
         patch_size: tuple[int, int],
         working_dir: Path,
@@ -319,6 +321,7 @@ class PatchedImage:
         for index,patch in enumerate(patches):
             patch_args.append(
                 PatchArgs(
+                    label=f"{label}_{index}",
                     location=(patch.location[0],patch.location[1]),
                     size=(patch.size[0], patch.size[1]),
                     image=image,
