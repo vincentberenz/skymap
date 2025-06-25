@@ -18,7 +18,7 @@ INPUT_IMAGE = Path("images/nightskycam3_2025_04_05_03_54_30.tiff")
 OUTPUT_PATH = INPUT_IMAGE.with_suffix(".pkl.gz")
 
 # to update: mix of patch sizes depending on the image area
-PATCH_SIZE = [300,300]
+PATCH_SIZE = [500,500]
 
 WORKING_DIR = Path("/tmp/skymap_debug/")
 NO_PLATE_SOLVING = False
@@ -29,7 +29,6 @@ NUM_PROCESSES = 8
 def main():
     """Process the image and save the result."""
     try:
-        logger.info(f"Processing image: {INPUT_IMAGE}")
         logger.info(f"Patch size: {PATCH_SIZE}")
 
         # Ensure output directory exists
