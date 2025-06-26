@@ -35,6 +35,36 @@ class Patch:
             :
         ]
 
+    def get_healpix_indices(self, nside: HEALPixNside, to_fill_image: np.ndarray)->np.ndarray:
+        npix = hp.nside2npix(nside)
+        if np.iinfo(np.uint16).max < npix:
+            raise ValueError(f"Cannot encode nside {nside} healpix using uint16")
+        image_data = self.get_image(to_fill_image)
+
+        def _commented():
+            indices = np.zeros(image_data.shape[:2], np.uint16)
+            for y in range(image_data.shape[0]):
+                for x in range(image_data.shape[1]):
+                    ra, dec = self.wcs.wcs_pix2world(x, y, 0)
+                    theta = np.radians(90 - dec)
+                    phi = np.radians(ra)
+                    hp_index = hp.ang2pix(nside, theta, phi)
+                indices[y][x] = hp_index
+            return indices
+
+        y,x  = np.indices(image_data.shape[:2])
+        sky_coords = self.wcs.all_pix2world(x, y, 0)
+        # Convert sky coordinates to radians
+        ra_rad = np.radians(sky_coords[0])
+        dec_rad = np.radians(sky_coords[1])
+    
+        # Convert to HEALPix indices
+        healpix_indices = hp.ang2pix(nside, 
+                                np.pi/2 - dec_rad,  # healpy uses theta, phi coordinates
+                                ra_rad)
+        return healpix_indices
+                
+    
     def get_healpix_dict(self, nside: HEALPixNside, image: np.ndarray) -> HEALPixDict:
         npix = hp.nside2npix(nside)
         image_data = self.get_image(image)

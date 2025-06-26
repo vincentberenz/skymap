@@ -211,6 +211,8 @@ class PatchedImage:
             KeyError: If the file is missing required data
         """
 
+        logger.info(f"Loading PatchedImage from {path}")
+
         path = Path(path)
         if not path.exists():
             raise FileNotFoundError(f"File not found: {path}")
@@ -413,6 +415,25 @@ class PatchedImage:
         """
         patch, nside, image = args
         return patch.get_healpix_dict(nside, image)
+
+    def get_healpix_indices(self, nside: HEALPixNside)->np.ndarray:
+        npix = hp.nside2npix(nside)
+        indices = np.zeros(self.image.shape[:2], np.uint16)
+        for patch in self.patches:
+            logger.info(f"processing patch {patch.index}")
+            if patch.wcs is not None:
+                logger.info(f"patch {patch.index} has transforms")
+                patch_indices: np.ndarray = patch.get_healpix_indices(nside, self.image)
+                indices[
+                    patch.location[0]:patch.location[0]+patch.size[0], 
+                    patch.location[1]:patch.location[1]+patch.size[1]
+                ] = patch_indices
+            else:
+                indices[
+                    patch.location[0]:patch.location[0]+patch.size[0], 
+                    patch.location[1]:patch.location[1]+patch.size[1]
+                ] = np.zeros((patch.size[0], patch.size[1]), np.uint16)
+        return indices
 
     def get_healpix_record(
         self, nside: HEALPixNside, 

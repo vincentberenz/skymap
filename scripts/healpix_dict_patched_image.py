@@ -2,8 +2,8 @@ from skymapper.patches import PatchedImage
 from skymapper.healpix import healpix_record_info
 from pathlib import Path
 
-PATCHED_IMAGE = "/home/vberenz/Workspaces/skymap-data/one-night/ns3/astrometry/patches/nightskycam3_2025_06_20_02_42_30.pkl.gz"
-OUTPUT_FILE = "/home/vberenz/Workspaces/skymap-data/one-night/ns3/astrometry/patches/nightskycam3_2025_06_20_02_42_30.healpix.pkl.gz"
+PATCHED_IMAGE = "/home/vberenz/Workspaces/skymap-data/one-night/ns5/astrometry/patches/nightskycam5_2025_06_20_02_42_30.pkl.gz"
+OUTPUT_FILE = "/home/vberenz/Workspaces/skymap-data/one-night/ns5/astrometry/patches/nightskycam5_2025_06_20_02_42_30.healpix.pkl.gz"
 ONE_PATCH_ONLY = False
 NSIDE = 1024
 NUM_PROCESSES = 7
